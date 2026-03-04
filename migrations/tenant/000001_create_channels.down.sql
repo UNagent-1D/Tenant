@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS channels;
+DROP TYPE IF EXISTS channel_type;
