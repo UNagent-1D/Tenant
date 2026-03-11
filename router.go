@@ -31,6 +31,9 @@ func SetupRouter() *gin.Engine {
 			adminGroup.GET("/tenants", func(c *gin.Context) {
 				c.JSON(http.StatusOK, gin.H{"message": "Listado de todos los tenants del sistema global."})
 			})
+
+			// 4A.1. Crear un Tenant (solo app_admin)
+			adminGroup.POST("/tenants", handlers.CreateTenant)
 		}
 
 		// 4B. Rutas protegidas a nivel del tenant
@@ -45,6 +48,14 @@ func SetupRouter() *gin.Engine {
 			tenantGroup.GET("/operations", middlewares.RoleMiddleware("tenant_admin", "tenant_operator"), func(c *gin.Context) {
 				c.JSON(http.StatusOK, gin.H{"message": "Panel de Operaciones de este Tenant"})
 			})
+		}
+
+		// 4C. Rutas para administración de usuarios
+		usersGroup := apiGroup.Group("/users")
+		// Ambos, app_admin y tenant_admin, pueden crear usuarios (la lógica de qué rol crean está en el handler)
+		usersGroup.Use(middlewares.RoleMiddleware("app_admin", "tenant_admin"))
+		{
+			usersGroup.POST("/", handlers.CreateUser)
 		}
 	}
 
