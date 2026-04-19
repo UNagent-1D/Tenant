@@ -43,3 +43,43 @@ func CreateTenant(c *gin.Context) {
 		"tenant":  tenant,
 	})
 }
+
+// DeleteTenant maneja la eliminación de tenants y usuarios asociados (solo app_admin)
+func DeleteTenant(c *gin.Context) {
+	tenantID := c.Param("id")
+
+	// Iniciar transacción
+	tx, err := config.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al iniciar la transacción"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Eliminar usuarios asociados al tenant primero
+	_, err = tx.Exec("DELETE FROM users WHERE id IN (SELECT user_id FROM user_tenants WHERE tenant_id = $1)", tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al eliminar los usuarios del tenant", "detalle": err.Error()})
+		return
+	}
+
+	// Eliminar el tenant
+	res, err := tx.Exec("DELETE FROM tenants WHERE id = $1", tenantID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al eliminar el tenant", "detalle": err.Error()})
+		return
+	}
+
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tenant no encontrado"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al finalizar la transacción"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Tenant y sus usuarios eliminados exitosamente"})
+}

@@ -34,6 +34,9 @@ func SetupRouter() *gin.Engine {
 
 			// 4A.1. Crear un Tenant (solo app_admin)
 			adminGroup.POST("/tenants", handlers.CreateTenant)
+
+			// 4A.2. Eliminar un Tenant (solo app_admin)
+			adminGroup.DELETE("/tenants/:id", handlers.DeleteTenant)
 		}
 
 		// 4B. Rutas protegidas a nivel del tenant
@@ -56,6 +59,7 @@ func SetupRouter() *gin.Engine {
 		usersGroup.Use(middlewares.RoleMiddleware("app_admin", "tenant_admin"))
 		{
 			usersGroup.POST("/", handlers.CreateUser)
+			usersGroup.DELETE("/:id", handlers.DeleteUser)
 		}
 	}
 

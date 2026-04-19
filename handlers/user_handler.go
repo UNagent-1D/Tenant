@@ -103,3 +103,53 @@ func CreateUser(c *gin.Context) {
 		"user_id": newUserID,
 	})
 }
+
+// DeleteUser maneja la eliminación de usuarios
+func DeleteUser(c *gin.Context) {
+	targetUserID := c.Param("id")
+
+	// Obtener los claims del usuario que hace la solicitud
+	claimsVal, exists := c.Get("user_claims")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Usuario no autenticado"})
+		return
+	}
+	requesterClaims := claimsVal.(*models.Claims)
+	requesterRole := requesterClaims.Role
+
+	var targetRole string
+	var targetTenantID *string
+	
+	err := config.DB.QueryRow("SELECT role, tenant_id FROM user_tenants WHERE user_id = $1", targetUserID).Scan(&targetRole, &targetTenantID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Usuario no encontrado"})
+		return
+	}
+
+	if requesterRole == "app_admin" {
+		if targetRole == "app_admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "app_admin no puede eliminar a otro app_admin"})
+			return
+		}
+	} else if requesterRole == "tenant_admin" {
+		if targetRole != "tenant_operator" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Un tenant_admin solo puede eliminar tenant_operators"})
+			return
+		}
+		if targetTenantID == nil || requesterClaims.TenantID == nil || *targetTenantID != *requesterClaims.TenantID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "No puedes eliminar un usuario que no pertenece a tu tenant"})
+			return
+		}
+	} else {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Rol no autorizado"})
+		return
+	}
+
+	_, err = config.DB.Exec("DELETE FROM users WHERE id = $1", targetUserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al eliminar el usuario", "detalle": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Usuario eliminado exitosamente"})
+}
