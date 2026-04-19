@@ -1,13 +1,15 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/UNagent-1D/Tenant/handlers"
 	"github.com/UNagent-1D/Tenant/middlewares"
 	"github.com/gin-gonic/gin"
 )
 
-// role runs RoleMiddleware followed by TenantScopeMiddleware so that
-// role enforcement (no DB) always runs before the scope resolution (needs DB).
+// tenantChain runs RoleMiddleware before TenantScopeMiddleware so that
+// role enforcement (no DB) always happens before the slug resolution (needs DB).
 func tenantChain(roles ...string) []gin.HandlerFunc {
 	return []gin.HandlerFunc{
 		middlewares.RoleMiddleware(roles...),
@@ -15,8 +17,29 @@ func tenantChain(roles ...string) []gin.HandlerFunc {
 	}
 }
 
+// corsMiddleware sets CORS headers and handles preflight OPTIONS requests.
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+		c.Header("Access-Control-Allow-Origin", origin)
+		c.Header("Vary", "Origin")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		c.Header("Access-Control-Allow-Credentials", "true")
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
 func SetupRouter() *gin.Engine {
 	router := gin.New()
+	router.Use(corsMiddleware())
 	router.Use(middlewares.RequestIDMiddleware())
 	router.Use(middlewares.StructuredLoggerMiddleware())
 	router.Use(gin.Recovery())
@@ -44,7 +67,6 @@ func SetupRouter() *gin.Engine {
 
 			tenant := tenants.Group("/:id")
 			{
-				// Tenant resource itself
 				tenant.GET("", append(tenantChain("tenant_admin"), handlers.GetTenant)...)
 				tenant.PATCH("", append(tenantChain("tenant_admin"), handlers.UpdateTenant)...)
 
