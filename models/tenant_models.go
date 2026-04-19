@@ -1,15 +1,31 @@
 package models
 
-// CreateTenantRequest mapea los datos enviados para crear un nuevo tenant
+import "time"
+
 type CreateTenantRequest struct {
-	Name   string `json:"name" binding:"required"`
-	Domain string `json:"domain"`
+	Slug                 string  `json:"slug" binding:"required"`
+	Name                 string  `json:"name" binding:"required"`
+	Plan                 string  `json:"plan" binding:"required,oneof=free starter pro enterprise"`
+	BrandingLogoURL      *string `json:"branding_logo_url"`
+	BrandingPrimaryColor *string `json:"branding_primary_color"`
 }
 
-// Tenant engloba los datos principales de un tenant
+type UpdateTenantRequest struct {
+	Name                 *string `json:"name"`
+	Plan                 *string `json:"plan"   binding:"omitempty,oneof=free starter pro enterprise"`
+	Status               *string `json:"status" binding:"omitempty,oneof=active suspended churned"`
+	BrandingLogoURL      *string `json:"branding_logo_url"`
+	BrandingPrimaryColor *string `json:"branding_primary_color"`
+}
+
 type Tenant struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Domain   string `json:"domain"`
-	IsActive bool   `json:"is_active"`
+	ID                   string    `json:"id"`
+	Slug                 string    `json:"slug"`
+	Name                 string    `json:"name"`
+	Plan                 string    `json:"plan"`
+	Status               string    `json:"status"`
+	BrandingLogoURL      *string   `json:"branding_logo_url"`
+	BrandingPrimaryColor *string   `json:"branding_primary_color"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }

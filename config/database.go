@@ -1,32 +1,29 @@
 package config
 
 import (
-	"database/sql"
+	"context"
 	"log"
 	"os"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var DB *sql.DB
+var DB *pgxpool.Pool
 
 func InitDB() {
-	// Puedes establecer la url de conexión mediante variables de entorno, o dejar la default para desarrollo
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		// Fallback local: asume que tienes postgres corriendo en localhost con estos datos
-		connStr = "host=localhost port=5432 user=postgres password=admin dbname=postgres sslmode=disable"
+		connStr = "postgres://postgres:admin@localhost:5432/tenantdb?sslmode=disable"
 	}
 
 	var err error
-	DB, err = sql.Open("postgres", connStr)
+	DB, err = pgxpool.New(context.Background(), connStr)
 	if err != nil {
-		log.Fatalf("Error al inicializar la base de datos: %q", err)
+		log.Fatalf("Error al inicializar la base de datos: %v", err)
 	}
 
-	err = DB.Ping()
-	if err != nil {
-		log.Fatalf("Error al conectar a la base de datos: %q", err)
+	if err = DB.Ping(context.Background()); err != nil {
+		log.Fatalf("Error al conectar a la base de datos: %v", err)
 	}
 
 	log.Println("Conexión a base de datos exitosa")
