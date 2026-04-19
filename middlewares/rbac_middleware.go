@@ -11,83 +11,78 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var jwtSecret = []byte(getEnv("JWT_SECRET", "super-secreto-cambiar-en-produccion"))
+// jwtKey reads the secret lazily so godotenv.Load() runs before the first use.
+func jwtKey() []byte {
+	s := os.Getenv("JWT_SECRET")
+	if s == "" {
+		s = "super-secreto-cambiar-en-produccion"
+	}
+	return []byte(s)
+}
 
 func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
+	if v, ok := os.LookupEnv(key); ok {
+		return v
 	}
 	return fallback
 }
 
-// AuthMiddleware extrae y valida el JWT desde la cabecera Authorization
+// AuthMiddleware validates the Bearer JWT in the Authorization header.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Token de autorización requerido en los headers"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Token de autorización requerido"})
 			return
 		}
 
-		parts := strings.Split(authHeader, " ")
+		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "El formato del token debe ser 'Bearer <token>'"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Formato inválido: Bearer <token>"})
 			return
 		}
 
-		tokenString := parts[1]
 		claims := &models.Claims{}
-
-		// Parsear el token e inferir su validez basado en la clave secreta y el algoritmo
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("algoritmo de firma no soportado: %v", token.Header["alg"])
+		token, err := jwt.ParseWithClaims(parts[1], claims, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("algoritmo no soportado: %v", t.Header["alg"])
 			}
-			return jwtSecret, nil
+			return jwtKey(), nil
 		})
-
 		if err != nil || !token.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Token inválido o expirado"})
 			return
 		}
 
-		// Injectar claims a la sesión para que los siguientes handlers puedan acceder al usuario
 		c.Set("user_claims", claims)
 		c.Set("user_role", claims.Role)
 		c.Next()
 	}
 }
 
-// RoleMiddleware revisa si el rol en los JWT claims (del middleware previo) está en los roles permitidos por el endpoint
+// RoleMiddleware checks that the caller's role is in allowedRoles.
+// app_admin always passes regardless of the allowed list.
 func RoleMiddleware(allowedRoles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		roleVal, exists := c.Get("user_role")
 		if !exists {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Sesión sin roles identificados"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Sesión sin rol identificado"})
+			return
+		}
+		userRole := roleVal.(string)
+
+		if userRole == "app_admin" {
+			c.Next()
 			return
 		}
 
-		userRole := roleVal.(string)
-		hasPermission := false
-
-		// Validamos el array de roles que permiten acceso al recurso
-		for _, role := range allowedRoles {
-			if userRole == role {
-				hasPermission = true
-				break
+		for _, r := range allowedRoles {
+			if userRole == r {
+				c.Next()
+				return
 			}
 		}
 
-		// Por norma de negocio, app_admin siempre sobre-escribe cualquier permiso particular de middleware y es omnipresente.
-		if userRole == "app_admin" {
-			hasPermission = true
-		}
-
-		if !hasPermission {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: permisos insuficientes para la acción solicitada"})
-			return
-		}
-
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Permisos insuficientes"})
 	}
 }

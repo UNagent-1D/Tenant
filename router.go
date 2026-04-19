@@ -2,45 +2,22 @@ package main
 
 import (
 	"net/http"
-	"time"
 
-	"github.com/UNagent-1D/Tenant/config"
 	"github.com/UNagent-1D/Tenant/handlers"
 	"github.com/UNagent-1D/Tenant/middlewares"
 	"github.com/gin-gonic/gin"
 )
 
-type tenantRow struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Domain    *string   `json:"domain"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+// tenantChain runs RoleMiddleware before TenantScopeMiddleware so that
+// role enforcement (no DB) always happens before the slug resolution (needs DB).
+func tenantChain(roles ...string) []gin.HandlerFunc {
+	return []gin.HandlerFunc{
+		middlewares.RoleMiddleware(roles...),
+		middlewares.TenantScopeMiddleware(),
+	}
 }
 
-func listTenantsHandler(c *gin.Context) {
-	rows, err := config.DB.Query(`SELECT id, name, domain, is_active, created_at, updated_at FROM tenants ORDER BY created_at DESC`)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	out := []tenantRow{}
-	for rows.Next() {
-		var t tenantRow
-		if err := rows.Scan(&t.ID, &t.Name, &t.Domain, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		out = append(out, t)
-	}
-	c.JSON(http.StatusOK, out)
-}
-
-// corsMiddleware answers preflight OPTIONS and attaches the CORS headers
-// every response needs so the browser-hosted frontend can call us.
+// corsMiddleware sets CORS headers and handles preflight OPTIONS requests.
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
@@ -60,42 +37,91 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// SetupRouter inicializa y configura todas las rutas HTTP de la aplicación
 func SetupRouter() *gin.Engine {
-	// 2. Levanta el enrutador de Gin
-	router := gin.Default()
+	router := gin.New()
 	router.Use(corsMiddleware())
+	router.Use(middlewares.RequestIDMiddleware())
+	router.Use(middlewares.StructuredLoggerMiddleware())
+	router.Use(gin.Recovery())
 
-	// 3. Rutas Públicas (No requieren Token)
-	authGroup := router.Group("/auth")
-	{
-		// Recibe { "email": "", "password": "" } y emite un JWT firmado verificando contra SQL
-		authGroup.POST("/login", handlers.LoginHandler)
-	}
+	// Public
+	router.POST("/auth/login", handlers.LoginHandler)
+	router.GET("/health", HealthCheck)
 
-	// 4. API protegida general (El AuthMiddleware obliga la presencia de JWT válido)
-	apiGroup := router.Group("/api")
-	apiGroup.Use(middlewares.AuthMiddleware())
+	api := router.Group("/api/v1")
+	api.Use(middlewares.AuthMiddleware())
 	{
-		// 4A. Rutas del App Admin (solo "app_admin", que no tiene Tenant ID asignado, los administra todos)
-		adminGroup := apiGroup.Group("/admin")
-		adminGroup.Use(middlewares.RoleMiddleware("app_admin"))
+		// ── Users ────────────────────────────────────────────────────────
+		users := api.Group("/users")
 		{
-			adminGroup.GET("/tenants", listTenantsHandler)
+			users.GET("", middlewares.RoleMiddleware("app_admin"), handlers.GetUsers)
+			users.POST("", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.CreateUser)
+			users.PATCH("/:uid", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.UpdateUser)
 		}
 
-		// 4B. Rutas protegidas a nivel del tenant
-		tenantGroup := apiGroup.Group("/tenant")
+		// ── Tenants ──────────────────────────────────────────────────────
+		tenants := api.Group("/tenants")
 		{
-			// Estadísticas: Requiere ser Tenant Admin
-			tenantGroup.GET("/stats", middlewares.RoleMiddleware("tenant_admin"), func(c *gin.Context) {
-				c.JSON(http.StatusOK, gin.H{"message": "Estadísticas del tenant principal"})
-			})
+			tenants.GET("", middlewares.RoleMiddleware("app_admin"), handlers.GetTenants)
+			tenants.POST("", middlewares.RoleMiddleware("app_admin"), handlers.CreateTenant)
 
-			// Operadores: Los tenant admins u operators pueden consultar el board de operaciones
-			tenantGroup.GET("/operations", middlewares.RoleMiddleware("tenant_admin", "tenant_operator"), func(c *gin.Context) {
-				c.JSON(http.StatusOK, gin.H{"message": "Panel de Operaciones de este Tenant"})
-			})
+			tenant := tenants.Group("/:id")
+			{
+				tenant.GET("", append(tenantChain("tenant_admin"), handlers.GetTenant)...)
+				tenant.PATCH("", append(tenantChain("tenant_admin"), handlers.UpdateTenant)...)
+
+				// Channels — tenant_admin only
+				channels := tenant.Group("/channels")
+				channels.Use(tenantChain("tenant_admin")...)
+				{
+					channels.GET("", handlers.GetChannels)
+					channels.POST("", handlers.CreateChannel)
+					channels.PATCH("/:cid", handlers.UpdateChannel)
+				}
+
+				// Agent Profiles
+				profiles := tenant.Group("/profiles")
+				{
+					profiles.GET("", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetProfiles)...)
+					profiles.POST("", append(tenantChain("tenant_admin"), handlers.CreateProfile)...)
+					profiles.PATCH("/:pid", append(tenantChain("tenant_admin"), handlers.UpdateProfile)...)
+
+					// Agent Configs (ACR)
+					configs := profiles.Group("/:pid/configs")
+					{
+						configs.GET("", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetConfigs)...)
+						configs.GET("/active", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetActiveConfig)...)
+						configs.POST("", append(tenantChain("tenant_admin"), handlers.CreateConfig)...)
+						configs.PATCH("/:cid", append(tenantChain("tenant_admin"), handlers.UpdateConfig)...)
+						configs.POST("/:cid/activate", append(tenantChain("tenant_admin"), handlers.ActivateConfig)...)
+					}
+				}
+
+				// Data Sources — tenant_admin only
+				dataSources := tenant.Group("/data-sources")
+				dataSources.Use(tenantChain("tenant_admin")...)
+				{
+					dataSources.GET("", handlers.GetDataSources)
+					dataSources.POST("", handlers.CreateDataSource)
+					dataSources.PATCH("/:did", handlers.UpdateDataSource)
+				}
+
+				// End Users
+				endUsers := tenant.Group("/end-users")
+				{
+					endUsers.POST("", append(tenantChain("tenant_admin"), handlers.CreateEndUser)...)
+					endUsers.GET("/lookup/phone/:number", append(tenantChain("tenant_admin", "tenant_operator"), handlers.LookupByPhone)...)
+					endUsers.GET("/lookup/national-id/:nid", append(tenantChain("tenant_admin", "tenant_operator"), handlers.LookupByNationalID)...)
+				}
+			}
+		}
+
+		// ── Tool Registry ─────────────────────────────────────────────────
+		tools := api.Group("/tool-registry")
+		{
+			tools.GET("", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.GetTools)
+			tools.POST("", middlewares.RoleMiddleware("app_admin"), handlers.CreateTool)
+			tools.PATCH("/:tid", middlewares.RoleMiddleware("app_admin"), handlers.UpdateTool)
 		}
 	}
 
