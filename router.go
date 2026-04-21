@@ -66,6 +66,14 @@ func SetupRouter() *gin.Engine {
 	router := gin.Default()
 	router.Use(corsMiddleware())
 
+	router.GET("/health", func(c *gin.Context) {
+		if err := config.DB.Ping(); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "db": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "tenant"})
+	})
+
 	// 3. Rutas Públicas (No requieren Token)
 	authGroup := router.Group("/auth")
 	{
