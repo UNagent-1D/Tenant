@@ -1,13 +1,17 @@
 package main
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/UNagent-1D/Tenant/config"
 	"github.com/UNagent-1D/Tenant/handlers"
 	"github.com/UNagent-1D/Tenant/middlewares"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type tenantRow struct {
@@ -17,6 +21,145 @@ type tenantRow struct {
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type createTenantRequest struct {
+	Name   string `json:"name" binding:"required"`
+	Domain string `json:"domain"`
+}
+
+func createTenantHandler(c *gin.Context) {
+	var req createTenantRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido", "detail": err.Error()})
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Domain = strings.TrimSpace(req.Domain)
+	if req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "El nombre es obligatorio"})
+		return
+	}
+
+	var domain any
+	if req.Domain == "" {
+		domain = nil
+	} else {
+		domain = req.Domain
+	}
+
+	var t tenantRow
+	err := config.DB.QueryRow(
+		`INSERT INTO tenants (name, domain) VALUES ($1, $2)
+		 RETURNING id, name, domain, is_active, created_at, updated_at`,
+		req.Name, domain,
+	).Scan(&t.ID, &t.Name, &t.Domain, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "Ya existe un tenant con ese dominio"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, t)
+}
+
+type createUserRequest struct {
+	Email     string  `json:"email" binding:"required,email"`
+	Password  string  `json:"password" binding:"required,min=6"`
+	FirstName string  `json:"first_name" binding:"required"`
+	LastName  string  `json:"last_name" binding:"required"`
+	Role      string  `json:"role" binding:"required"`
+	TenantID  *string `json:"tenant_id"`
+}
+
+type createUserResponse struct {
+	UserID  string `json:"user_id"`
+	Message string `json:"message"`
+}
+
+func createUserHandler(c *gin.Context) {
+	var req createUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload inválido", "detail": err.Error()})
+		return
+	}
+
+	switch req.Role {
+	case "app_admin":
+		req.TenantID = nil
+	case "tenant_admin", "tenant_operator":
+		if req.TenantID == nil || strings.TrimSpace(*req.TenantID) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id es obligatorio para este rol"})
+			return
+		}
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Rol inválido"})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo cifrar la contraseña"})
+		return
+	}
+
+	tx, err := config.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+
+	var userID string
+	err = tx.QueryRow(
+		`INSERT INTO users (email, password_hash, first_name, last_name)
+		 VALUES ($1, $2, $3, $4) RETURNING id`,
+		strings.ToLower(strings.TrimSpace(req.Email)), string(hash), req.FirstName, req.LastName,
+	).Scan(&userID)
+	if err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "Ya existe un usuario con ese email"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.TenantID != nil {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)`, *req.TenantID).Scan(&exists); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id no existe"})
+			return
+		}
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO user_tenants (user_id, tenant_id, role) VALUES ($1, $2, $3)`,
+		userID, req.TenantID, req.Role,
+	); err != nil {
+		var pgErr *pq.Error
+		if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "La combinación rol/tenant viola la política del sistema"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, createUserResponse{UserID: userID, Message: "Usuario creado"})
 }
 
 func listTenantsHandler(c *gin.Context) {
@@ -90,6 +233,8 @@ func SetupRouter() *gin.Engine {
 		adminGroup.Use(middlewares.RoleMiddleware("app_admin"))
 		{
 			adminGroup.GET("/tenants", listTenantsHandler)
+			adminGroup.POST("/tenants", createTenantHandler)
+			adminGroup.POST("/users", createUserHandler)
 		}
 
 		// 4B. Rutas protegidas a nivel del tenant
