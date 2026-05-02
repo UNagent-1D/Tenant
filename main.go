@@ -1,19 +1,49 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
+	"time"
 
 	"github.com/UNagent-1D/Tenant/config"
+	"github.com/UNagent-1D/Tenant/pkg/db"
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// 1. Inicializa la conexión a la base de datos (PostgreSQL)
-	config.InitDB()
+	cfg := config.Load()
 
-	// 2. Levanta el enrutador de Gin a través del archivo router.go
-	router := SetupRouter()
+	if err := db.Init(cfg.DatabaseURL); err != nil {
+		log.Fatalf("cannot connect to database: %v", err)
+	}
+	defer db.Close()
 
-	// 3. Correr servidor
-	log.Println("Inciando servidor en el puerto :8080...")
-	router.Run(":8080")
+	router := SetupRouter(cfg)
+
+	log.Printf("starting server on :%s", cfg.Port)
+	if err := router.Run(":" + cfg.Port); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
+}
+
+func HealthCheck(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := db.Pool.Ping(ctx); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"status":    "degraded",
+			"db":        "error: " + err.Error(),
+			"version":   "2.2.0",
+			"timestamp": time.Now().UTC(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "ok",
+		"db":        "ok",
+		"version":   "2.2.0",
+		"timestamp": time.Now().UTC(),
+	})
 }

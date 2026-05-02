@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS data_sources CASCADE;
+DROP TYPE IF EXISTS source_type CASCADE;
