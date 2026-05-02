@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -20,6 +23,33 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// scanLoginRow runs the login query with one transparent retry on driver-bad-conn
+// errors. lib/pq does not always surface a stale Supabase pooler connection as
+// driver.ErrBadConn on the first call, so we Ping + retry once before giving up.
+func scanLoginRow(query, email string, user *models.User, uTenant *models.UserTenant) error {
+	scan := func() error {
+		return config.DB.QueryRow(query, email).Scan(
+			&user.ID, &user.Email, &user.PasswordHash, &user.Active,
+			&uTenant.TenantID, &uTenant.Role,
+		)
+	}
+
+	err := scan()
+	if err == nil || err == sql.ErrNoRows {
+		return err
+	}
+	if !errors.Is(err, driver.ErrBadConn) {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if pingErr := config.DB.PingContext(ctx); pingErr != nil {
+		return pingErr
+	}
+	return scan()
 }
 
 // LoginHandler controla la autenticación, verifica clave y emite JWT en base al rol de BD
@@ -43,10 +73,7 @@ func LoginHandler(c *gin.Context) {
 		LIMIT 1;
 	`
 
-	err := config.DB.QueryRow(query, req.Email).Scan(
-		&user.ID, &user.Email, &user.PasswordHash, &user.Active,
-		&uTenant.TenantID, &uTenant.Role,
-	)
+	err := scanLoginRow(query, req.Email, &user, &uTenant)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
