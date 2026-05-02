@@ -3,8 +3,10 @@ package main
 import (
 	"net/http"
 
-	"github.com/UNagent-1D/Tenant/handlers"
-	"github.com/UNagent-1D/Tenant/middlewares"
+	"github.com/UNagent-1D/Tenant/config"
+	"github.com/UNagent-1D/Tenant/internal/auth"
+	"github.com/UNagent-1D/Tenant/internal/tenant"
+	mw "github.com/UNagent-1D/Tenant/pkg/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -12,12 +14,11 @@ import (
 // role enforcement (no DB) always happens before the slug resolution (needs DB).
 func tenantChain(roles ...string) []gin.HandlerFunc {
 	return []gin.HandlerFunc{
-		middlewares.RoleMiddleware(roles...),
-		middlewares.TenantScopeMiddleware(),
+		auth.RoleMiddleware(roles...),
+		tenant.TenantScopeMiddleware(),
 	}
 }
 
-// corsMiddleware sets CORS headers and handles preflight OPTIONS requests.
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
@@ -27,7 +28,7 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Origin", origin)
 		c.Header("Vary", "Origin")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Internal-Key")
 		c.Header("Access-Control-Allow-Credentials", "true")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -37,92 +38,99 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-func SetupRouter() *gin.Engine {
+func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.New()
 	router.Use(corsMiddleware())
-	router.Use(middlewares.RequestIDMiddleware())
-	router.Use(middlewares.StructuredLoggerMiddleware())
+	router.Use(mw.RequestIDMiddleware())
+	router.Use(mw.StructuredLoggerMiddleware())
 	router.Use(gin.Recovery())
 
 	// Public
-	router.POST("/auth/login", handlers.LoginHandler)
+	router.POST("/auth/login", auth.LoginHandler(cfg))
 	router.GET("/health", HealthCheck)
 
 	api := router.Group("/api/v1")
-	api.Use(middlewares.AuthMiddleware())
+	api.Use(auth.AuthMiddleware(cfg))
 	{
-		// ── Users ────────────────────────────────────────────────────────
+		// ── Users ─────────────────────────────────────────────────────────
 		users := api.Group("/users")
 		{
-			users.GET("", middlewares.RoleMiddleware("app_admin"), handlers.GetUsers)
-			users.POST("", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.CreateUser)
-			users.PATCH("/:uid", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.UpdateUser)
+			users.GET("", auth.RoleMiddleware("app_admin"), auth.GetUsers)
+			users.POST("", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.CreateUser)
+			users.PATCH("/:uid", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.UpdateUser)
 		}
 
-		// ── Tenants ──────────────────────────────────────────────────────
+		// ── Tenants ───────────────────────────────────────────────────────
 		tenants := api.Group("/tenants")
 		{
-			tenants.GET("", middlewares.RoleMiddleware("app_admin"), handlers.GetTenants)
-			tenants.POST("", middlewares.RoleMiddleware("app_admin"), handlers.CreateTenant)
+			tenants.GET("", auth.RoleMiddleware("app_admin"), tenant.GetTenants)
+			tenants.POST("", auth.RoleMiddleware("app_admin"), tenant.CreateTenant(cfg))
 
-			tenant := tenants.Group("/:id")
+			tenantGroup := tenants.Group("/:id")
 			{
-				tenant.GET("", append(tenantChain("tenant_admin"), handlers.GetTenant)...)
-				tenant.PATCH("", append(tenantChain("tenant_admin"), handlers.UpdateTenant)...)
+				tenantGroup.GET("", append(tenantChain("tenant_admin"), tenant.GetTenant)...)
+				tenantGroup.PATCH("", append(tenantChain("tenant_admin"), tenant.UpdateTenant)...)
 
 				// Channels — tenant_admin only
-				channels := tenant.Group("/channels")
+				channels := tenantGroup.Group("/channels")
 				channels.Use(tenantChain("tenant_admin")...)
 				{
-					channels.GET("", handlers.GetChannels)
-					channels.POST("", handlers.CreateChannel)
-					channels.PATCH("/:cid", handlers.UpdateChannel)
+					channels.GET("", tenant.GetChannels)
+					channels.POST("", tenant.CreateChannel)
+					channels.PATCH("/:cid", tenant.UpdateChannel)
 				}
 
 				// Agent Profiles
-				profiles := tenant.Group("/profiles")
+				profiles := tenantGroup.Group("/profiles")
 				{
-					profiles.GET("", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetProfiles)...)
-					profiles.POST("", append(tenantChain("tenant_admin"), handlers.CreateProfile)...)
-					profiles.PATCH("/:pid", append(tenantChain("tenant_admin"), handlers.UpdateProfile)...)
+					profiles.GET("", append(tenantChain("tenant_admin", "tenant_operator"), tenant.GetProfiles)...)
+					profiles.POST("", append(tenantChain("tenant_admin"), tenant.CreateProfile)...)
+					profiles.PATCH("/:pid", append(tenantChain("tenant_admin"), tenant.UpdateProfile)...)
 
 					// Agent Configs (ACR)
 					configs := profiles.Group("/:pid/configs")
 					{
-						configs.GET("", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetConfigs)...)
-						configs.GET("/active", append(tenantChain("tenant_admin", "tenant_operator"), handlers.GetActiveConfig)...)
-						configs.POST("", append(tenantChain("tenant_admin"), handlers.CreateConfig)...)
-						configs.PATCH("/:cid", append(tenantChain("tenant_admin"), handlers.UpdateConfig)...)
-						configs.POST("/:cid/activate", append(tenantChain("tenant_admin"), handlers.ActivateConfig)...)
+						configs.GET("", append(tenantChain("tenant_admin", "tenant_operator"), tenant.GetConfigs)...)
+						configs.GET("/active", append(tenantChain("tenant_admin", "tenant_operator"), tenant.GetActiveConfig)...)
+						configs.POST("", append(tenantChain("tenant_admin"), tenant.CreateConfig)...)
+						configs.PATCH("/:cid", append(tenantChain("tenant_admin"), tenant.UpdateConfig)...)
+						configs.POST("/:cid/activate", append(tenantChain("tenant_admin"), tenant.ActivateConfig)...)
 					}
 				}
 
 				// Data Sources — tenant_admin only
-				dataSources := tenant.Group("/data-sources")
+				dataSources := tenantGroup.Group("/data-sources")
 				dataSources.Use(tenantChain("tenant_admin")...)
 				{
-					dataSources.GET("", handlers.GetDataSources)
-					dataSources.POST("", handlers.CreateDataSource)
-					dataSources.PATCH("/:did", handlers.UpdateDataSource)
+					dataSources.GET("", tenant.GetDataSources)
+					dataSources.POST("", tenant.CreateDataSource)
+					dataSources.PATCH("/:did", tenant.UpdateDataSource)
 				}
 
 				// End Users
-				endUsers := tenant.Group("/end-users")
+				endUsers := tenantGroup.Group("/end-users")
 				{
-					endUsers.POST("", append(tenantChain("tenant_admin"), handlers.CreateEndUser)...)
-					endUsers.GET("/lookup/phone/:number", append(tenantChain("tenant_admin", "tenant_operator"), handlers.LookupByPhone)...)
-					endUsers.GET("/lookup/national-id/:nid", append(tenantChain("tenant_admin", "tenant_operator"), handlers.LookupByNationalID)...)
+					endUsers.POST("", append(tenantChain("tenant_admin"), tenant.CreateEndUser)...)
+					endUsers.GET("/lookup/phone/:number", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByPhone)...)
+					endUsers.GET("/lookup/national-id/:nid", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByNationalID)...)
 				}
 			}
 		}
 
-		// ── Tool Registry ─────────────────────────────────────────────────
+		// ── Tool Registry ──────────────────────────────────────────────────
 		tools := api.Group("/tool-registry")
 		{
-			tools.GET("", middlewares.RoleMiddleware("app_admin", "tenant_admin"), handlers.GetTools)
-			tools.POST("", middlewares.RoleMiddleware("app_admin"), handlers.CreateTool)
-			tools.PATCH("/:tid", middlewares.RoleMiddleware("app_admin"), handlers.UpdateTool)
+			tools.GET("", auth.RoleMiddleware("app_admin", "tenant_admin"), tenant.GetTools)
+			tools.POST("", auth.RoleMiddleware("app_admin"), tenant.CreateTool)
+			tools.PATCH("/:tid", auth.RoleMiddleware("app_admin"), tenant.UpdateTool)
 		}
+	}
+
+	// ── Internal (orchestrator only) ───────────────────────────────────────
+	internal := router.Group("/api/v1/internal")
+	internal.Use(auth.InternalKeyMiddleware(cfg))
+	{
+		internal.POST("/:id/execute", tenant.ExecuteDataSource(cfg))
 	}
 
 	return router

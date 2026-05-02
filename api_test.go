@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/UNagent-1D/Tenant/config"
-	"github.com/UNagent-1D/Tenant/models"
+	"github.com/UNagent-1D/Tenant/internal/auth"
+	"github.com/UNagent-1D/Tenant/pkg/db"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -34,49 +34,56 @@ const (
 	testTenantBSlug = "hospital-test-b"
 )
 
-// ─── Globals set in TestMain ───────────────────────────────────────────────────
+// ─── Globals set in TestMain ──────────────────────────────────────────────────
 
 var (
-	testRouter       *gin.Engine
-	appAdminToken    string
-	tenantAAdminTok  string
-	tenantAOperTok   string
-	tenantBAdminTok  string
+	testRouter      *gin.Engine
+	appAdminToken   string
+	tenantAAdminTok string
+	tenantAOperTok  string
+	tenantBAdminTok string
 )
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 
 func TestMain(m *testing.M) {
-	godotenv.Load()
 	gin.SetMode(gin.TestMode)
+
+	// Provide defaults for required env vars so tests don't panic
+	if os.Getenv("INTERNAL_API_KEY") == "" {
+		os.Setenv("INTERNAL_API_KEY", "test-internal-key")
+	}
+
+	cfg := config.Load()
 
 	// Init DB only for integration tests
 	if dbURL := os.Getenv("TEST_DATABASE_URL"); dbURL != "" {
 		os.Setenv("DATABASE_URL", dbURL)
-		config.InitDB()
-		seedDB()
+		cfg = config.Load()
+		if err := db.Init(cfg.DatabaseURL); err == nil {
+			seedDB()
+		}
 	}
 
 	tA := testTenantAID
 	tB := testTenantBID
 
-	appAdminToken   = makeToken(testAdminID, "app_admin", nil)
+	appAdminToken = makeToken(testAdminID, "app_admin", nil)
 	tenantAAdminTok = makeToken(testAdminID, "tenant_admin", &tA)
-	tenantAOperTok  = makeToken(testAdminID, "tenant_operator", &tA)
+	tenantAOperTok = makeToken(testAdminID, "tenant_operator", &tA)
 	tenantBAdminTok = makeToken(testAdminID, "tenant_admin", &tB)
 
-	testRouter = SetupRouter()
+	testRouter = SetupRouter(cfg)
 	os.Exit(m.Run())
 }
 
-// seedDB inserts minimal rows for integration tests and runs after each test
-// suite by truncating. Run only when TEST_DATABASE_URL is set.
+// seedDB inserts minimal rows for integration tests.
 func seedDB() {
 	ctx := context.Background()
-	config.DB.Exec(ctx, `TRUNCATE users, tenants, tool_registry CASCADE`)
+	db.Pool.Exec(ctx, `TRUNCATE users, tenants, tool_registry CASCADE`)
 
 	hash, _ := bcrypt.GenerateFromPassword([]byte("Test1234!"), bcrypt.DefaultCost)
-	config.DB.Exec(ctx,
+	db.Pool.Exec(ctx,
 		`INSERT INTO users (id, email, password_hash, role) VALUES ($1,$2,$3,'app_admin')`,
 		testAdminID, "admin@test.internal", string(hash),
 	)
@@ -85,7 +92,7 @@ func seedDB() {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func makeToken(userID, role string, tenantID *string) string {
-	claims := &models.Claims{
+	claims := &auth.Claims{
 		UserID:   userID,
 		Email:    "test@example.com",
 		TenantID: tenantID,
@@ -124,7 +131,7 @@ func assertStatus(t *testing.T, got, want int) {
 
 func skipIfNoDB(t *testing.T) {
 	t.Helper()
-	if config.DB == nil {
+	if db.Pool == nil {
 		t.Skip("set TEST_DATABASE_URL to run integration tests")
 	}
 }
@@ -133,7 +140,6 @@ func skipIfNoDB(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	w := req(t, http.MethodGet, "/health", nil, "")
-	// 200 with DB, 503 without — either is a valid non-4xx response
 	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
 		t.Errorf("health must not require auth, got %d", w.Code)
 	}
@@ -196,7 +202,7 @@ func TestInvalidToken(t *testing.T) {
 }
 
 func TestExpiredToken(t *testing.T) {
-	claims := &models.Claims{
+	claims := &auth.Claims{
 		UserID: testAdminID,
 		Email:  "x@x.com",
 		Role:   "app_admin",
@@ -231,13 +237,11 @@ func TestRoleEnforcement(t *testing.T) {
 		method string
 		path   string
 	}{
-		// tenant_operator cannot write
 		{"operator POST tenant", tenantAOperTok, http.MethodPost, "/api/v1/tenants"},
 		{"operator POST user", tenantAOperTok, http.MethodPost, "/api/v1/users"},
 		{"operator POST tool", tenantAOperTok, http.MethodPost, "/api/v1/tool-registry"},
 		{"operator GET all tenants", tenantAOperTok, http.MethodGet, "/api/v1/tenants"},
 		{"operator GET all users", tenantAOperTok, http.MethodGet, "/api/v1/users"},
-		// tenant_admin cannot access app_admin-only routes
 		{"tenant_admin GET all tenants", tenantAAdminTok, http.MethodGet, "/api/v1/tenants"},
 		{"tenant_admin GET all users", tenantAAdminTok, http.MethodGet, "/api/v1/users"},
 		{"tenant_admin POST tool", tenantAAdminTok, http.MethodPost, "/api/v1/tool-registry"},
@@ -254,8 +258,6 @@ func TestRoleEnforcement(t *testing.T) {
 // ─── 4. Cross-tenant enforcement ─────────────────────────────────────────────
 
 func TestCrossTenantEnforcement(t *testing.T) {
-	// tenantBAdminTok has tenant_id = testTenantBID
-	// Accessing resources under testTenantAID must return 403
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/tenants/" + testTenantAID},
 		{http.MethodPatch, "/api/v1/tenants/" + testTenantAID},
@@ -278,7 +280,7 @@ func TestCrossTenantEnforcement(t *testing.T) {
 	}
 }
 
-// ─── 5. Request validation — valid auth + bad payload = 400 ──────────────────
+// ─── 5. Request validation ────────────────────────────────────────────────────
 
 func TestCreateTenant_Validation(t *testing.T) {
 	cases := []struct {
@@ -333,7 +335,6 @@ func TestCreateChannel_Validation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, "/api/v1/tenants/"+testTenantAID+"/channels", tc.body, tenantAAdminTok)
-			// 400 from validation OR 403 from TenantScopeMiddleware (no DB) — both are non-2xx
 			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound && w.Code != http.StatusInternalServerError {
 				t.Errorf("expected 4xx or 5xx (no DB), got %d", w.Code)
 			}
@@ -364,17 +365,6 @@ func TestCreateDataSource_Validation(t *testing.T) {
 
 func TestCreateAgentConfig_Validation(t *testing.T) {
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
-	validBase := map[string]any{
-		"conversation_policy": map[string]any{"steps": []string{}},
-		"escalation_rules":    []map[string]string{{"condition": "frustrated"}},
-		"tool_permissions":    []map[string]string{{"tool_name": "list_doctors"}},
-		"llm_params": map[string]any{
-			"model":       "gpt-4o",
-			"temperature": 0.3,
-			"max_tokens":  1024,
-		},
-	}
-
 	cases := []struct {
 		name string
 		body any
@@ -399,10 +389,9 @@ func TestCreateAgentConfig_Validation(t *testing.T) {
 			}
 		})
 	}
-	_ = validBase
 }
 
-// ─── 6. LLM params validation (via CreateConfig with valid auth) ───────────────
+// ─── 6. LLM params validation ─────────────────────────────────────────────────
 
 func TestLLMParamsValidation(t *testing.T) {
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
@@ -434,10 +423,7 @@ func TestLLMParamsValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, path, tc.body, tenantAAdminTok)
-			// Without DB: TenantScopeMiddleware panics → 500 before we even reach the handler.
-			// With DB: handler validates and returns 400.
-			// So with DB we assert 400; without DB we skip this specific check.
-			if config.DB != nil {
+			if db.Pool != nil {
 				assertStatus(t, w.Code, tc.want)
 			} else if w.Code == http.StatusCreated || w.Code == http.StatusOK {
 				t.Errorf("validation must reject invalid llm_params, got %d", w.Code)
@@ -450,12 +436,12 @@ func TestEscalationRulesValidation(t *testing.T) {
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
 	body := map[string]any{
 		"conversation_policy": map[string]any{},
-		"escalation_rules":    []any{}, // empty — must fail
+		"escalation_rules":    []any{},
 		"tool_permissions":    []string{},
 		"llm_params":          map[string]any{"model": "gpt-4o", "temperature": 0.5, "max_tokens": 512},
 	}
 	w := req(t, http.MethodPost, path, body, tenantAAdminTok)
-	if config.DB != nil {
+	if db.Pool != nil {
 		assertStatus(t, w.Code, http.StatusBadRequest)
 	} else if w.Code == http.StatusCreated {
 		t.Error("empty escalation_rules must not be accepted")
@@ -488,10 +474,6 @@ func TestCreateEndUser_Validation(t *testing.T) {
 // ─── 8. Operator read-only scope ──────────────────────────────────────────────
 
 func TestOperatorReadOnly(t *testing.T) {
-	// Operators CAN read these endpoints (should not be 403)
-	// Without DB they'll return 500, but not 403
-	// Per spec: operators can read profiles, configs, and end-user lookups.
-	// tool-registry is app_admin + tenant_admin only (not operator).
 	reads := []string{
 		"/api/v1/tenants/" + testTenantAID + "/profiles",
 		"/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs",
@@ -508,7 +490,6 @@ func TestOperatorReadOnly(t *testing.T) {
 		})
 	}
 
-	// Operators CANNOT write these endpoints
 	writes := []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/channels"},
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/profiles"},
@@ -591,7 +572,6 @@ func TestIntegration_TenantCRUD(t *testing.T) {
 
 	t.Run("get tenant not found", func(t *testing.T) {
 		w := req(t, http.MethodGet, "/api/v1/tenants/00000000-0000-0000-0000-999999999999", nil, appAdminToken)
-		// TenantScopeMiddleware returns 404 if slug not found
 		assertStatus(t, w.Code, http.StatusNotFound)
 	})
 
@@ -616,7 +596,6 @@ func TestIntegration_TenantCRUD(t *testing.T) {
 func TestIntegration_UserCRUD(t *testing.T) {
 	skipIfNoDB(t)
 
-	// First create a tenant to attach users to
 	wt := req(t, http.MethodPost, "/api/v1/tenants", map[string]any{
 		"slug": "user-test-tenant",
 		"name": "User Test Hospital",
@@ -683,7 +662,6 @@ func TestIntegration_UserCRUD(t *testing.T) {
 func TestIntegration_ChannelCRUD(t *testing.T) {
 	skipIfNoDB(t)
 
-	// Create tenant
 	wt := req(t, http.MethodPost, "/api/v1/tenants", map[string]any{
 		"slug": "channel-test-tenant",
 		"name": "Channel Test Hospital",
@@ -725,7 +703,6 @@ func TestIntegration_ChannelCRUD(t *testing.T) {
 func TestIntegration_ProfileAndACRFlow(t *testing.T) {
 	skipIfNoDB(t)
 
-	// Create tenant
 	wt := req(t, http.MethodPost, "/api/v1/tenants", map[string]any{
 		"slug": "acr-test-tenant",
 		"name": "ACR Test Hospital",
@@ -824,7 +801,6 @@ func TestIntegration_ProfileAndACRFlow(t *testing.T) {
 		w := req(t, http.MethodPost,
 			"/api/v1/tenants/"+tenantID+"/profiles/"+profileID+"/configs/"+configID+"/activate",
 			nil, appAdminToken)
-		// The config is now active, not draft — must return 404
 		assertStatus(t, w.Code, http.StatusNotFound)
 	})
 }
@@ -849,8 +825,8 @@ func TestIntegration_DataSourceCRUD(t *testing.T) {
 			"source_type": "scheduling",
 			"base_url":    "https://mock-hospital.internal",
 			"route_configs": map[string]any{
-				"list_doctors":      map[string]string{"method": "GET", "path": "/doctors"},
-				"book_appointment":  map[string]string{"method": "POST", "path": "/appointments"},
+				"list_doctors":     map[string]string{"method": "GET", "path": "/doctors"},
+				"book_appointment": map[string]string{"method": "POST", "path": "/appointments"},
 			},
 		}, appAdminToken)
 		assertStatus(t, w.Code, http.StatusCreated)
@@ -870,9 +846,9 @@ func TestIntegration_DataSourceCRUD(t *testing.T) {
 		}
 		w := req(t, http.MethodPatch, "/api/v1/tenants/"+tenantID+"/data-sources/"+dsID, map[string]any{
 			"route_configs": map[string]any{
-				"list_doctors":        map[string]string{"method": "GET", "path": "/doctors"},
-				"book_appointment":    map[string]string{"method": "POST", "path": "/appointments"},
-				"cancel_appointment":  map[string]string{"method": "DELETE", "path": "/appointments/{id}"},
+				"list_doctors":       map[string]string{"method": "GET", "path": "/doctors"},
+				"book_appointment":   map[string]string{"method": "POST", "path": "/appointments"},
+				"cancel_appointment": map[string]string{"method": "DELETE", "path": "/appointments/{id}"},
 			},
 		}, appAdminToken)
 		assertStatus(t, w.Code, http.StatusOK)
@@ -929,7 +905,7 @@ func TestIntegration_EndUserLookup(t *testing.T) {
 		w := req(t, http.MethodPost, "/api/v1/tenants/"+tenantID+"/end-users", map[string]any{
 			"full_name":   "Otro Juan",
 			"national_id": "99999999",
-			"cellphone":   "+573001234567", // already registered
+			"cellphone":   "+573001234567",
 		}, appAdminToken)
 		assertStatus(t, w.Code, http.StatusConflict)
 	})

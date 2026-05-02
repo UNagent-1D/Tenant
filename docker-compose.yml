@@ -9,7 +9,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./sql/init_schema.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
     healthcheck:
@@ -18,6 +17,32 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: migrate/migrate:v4
+    env_file: .env
+    volumes:
+      - ./migrations/global:/migrations
+    command: ["-path=/migrations", "-database=${DATABASE_URL}", "up"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: on-failure
+
+  seed:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SEED_EMAIL: ${SEED_EMAIL}
+      SEED_PASSWORD: ${SEED_PASSWORD}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    command: ["./seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - seed
+
   app:
     build: .
     restart: unless-stopped
@@ -25,12 +50,13 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       GIN_MODE: ${GIN_MODE}
     ports:
       - "8080:8080"
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pg_data:

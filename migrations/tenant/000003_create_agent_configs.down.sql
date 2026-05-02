@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS agent_configs CASCADE;
+DROP TYPE IF EXISTS config_status CASCADE;
