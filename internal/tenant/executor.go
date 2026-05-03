@@ -19,6 +19,7 @@ import (
 func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID := c.Param("id")
+		dataSourceID := c.Param("did")
 
 		var req ExecuteRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -26,17 +27,22 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// Resolve tenant slug to build schema name
+		// Resolve tenant — check it exists and is active
 		var slug string
+		var isActive bool
 		err := db.Pool.QueryRow(c.Request.Context(),
-			"SELECT slug FROM tenants WHERE id = $1", tenantID,
-		).Scan(&slug)
+			"SELECT slug, is_active FROM tenants WHERE id = $1", tenantID,
+		).Scan(&slug, &isActive)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Tenant no encontrado"})
+				c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno"})
+			internalError(c)
+			return
+		}
+		if !isActive {
+			c.JSON(http.StatusNotFound, gin.H{"error": "tenant is not active"})
 			return
 		}
 
@@ -47,14 +53,14 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 		err = db.Pool.QueryRow(c.Request.Context(),
 			fmt.Sprintf(`SELECT id, base_url, credential_ref, route_configs
 			             FROM %s.data_sources WHERE id = $1 AND is_active = true`, schema),
-			req.DataSourceID,
+			dataSourceID,
 		).Scan(&ds.ID, &ds.BaseURL, &ds.CredentialRef, &ds.RouteConfigs)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				c.JSON(http.StatusNotFound, gin.H{"error": "Data source no encontrado o inactivo"})
+				c.JSON(http.StatusNotFound, gin.H{"error": "data source not found"})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al obtener data source"})
+			internalError(c)
 			return
 		}
 
@@ -64,7 +70,7 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 			Path   string `json:"path"`
 		}
 		if err := json.Unmarshal(ds.RouteConfigs, &routes); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "route_configs inválido"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid route_configs", "request_id": c.GetString("request_id")})
 			return
 		}
 		route, ok := routes[req.Operation]
@@ -97,7 +103,7 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 				c.JSON(http.StatusGatewayTimeout, gin.H{"error": "external system did not respond in time"})
 				return
 			}
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("external system error: %s", err.Error())})
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to connect to external system: %s", err.Error())})
 			return
 		}
 		defer resp.Body.Close()

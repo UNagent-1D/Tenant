@@ -18,7 +18,7 @@ func TenantScopeMiddleware() gin.HandlerFunc {
 
 		if claims.Role != "app_admin" {
 			if claims.TenantID == nil || *claims.TenantID != tenantID {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: tenant incorrecto"})
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "access denied to this tenant"})
 				return
 			}
 		}
@@ -29,10 +29,10 @@ func TenantScopeMiddleware() gin.HandlerFunc {
 		).Scan(&slug)
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "Tenant no encontrado"})
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
 				return
 			}
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Error interno"})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "request_id": c.GetString("request_id")})
 			return
 		}
 
