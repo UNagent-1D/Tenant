@@ -271,6 +271,11 @@ X-Request-ID: req_7f3a9b12
 { "error": "tenant_id is required for tenant_admin and tenant_operator roles" }
 ```
 
+**400 Bad Request — tenant_id no existe:**
+```json
+{ "error": "tenant_id references a tenant that does not exist" }
+```
+
 **401 Unauthorized:**
 ```json
 { "error": "missing or invalid authorization token" }
@@ -312,6 +317,11 @@ X-Request-ID: req_7f3a9b12
   "is_active": true,
   "created_at": "2026-03-04T09:20:00Z"
 }
+```
+
+**400 Bad Request — ID con formato inválido:**
+```json
+{ "error": "invalid user id format" }
 ```
 
 **401 Unauthorized:**
@@ -423,6 +433,12 @@ X-Request-ID: req_7f3a9b12
 ```json
 { "error": "user not found" }
 ```
+
+**409 Conflict — Usuario activo:**
+```json
+{ "error": "user must be inactive before deletion" }
+```
+> Un usuario debe ser desactivado primero (`PATCH /api/v1/users/:uid` con `"is_active": false`) antes de poder eliminarse.
 
 ---
 

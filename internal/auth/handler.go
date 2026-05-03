@@ -274,6 +274,11 @@ func GetUser(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			return
 		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "22P02" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id format"})
+			return
+		}
 		internalError(c)
 		return
 	}
@@ -349,9 +354,15 @@ func CreateUser(c *gin.Context) {
 
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			c.JSON(http.StatusConflict, gin.H{"error": "a user with this email already exists"})
-			return
+		if errors.As(err, &pgErr) {
+			switch pgErr.Code {
+			case "23505":
+				c.JSON(http.StatusConflict, gin.H{"error": "a user with this email already exists"})
+				return
+			case "23503":
+				c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id references a tenant that does not exist"})
+				return
+			}
 		}
 		internalError(c)
 		return
@@ -436,14 +447,22 @@ func DeleteUser(c *gin.Context) {
 	}
 
 	result, err := db.Pool.Exec(c.Request.Context(),
-		`DELETE FROM users WHERE id = $1`, userID,
+		`DELETE FROM users WHERE id = $1 AND is_active = false`, userID,
 	)
 	if err != nil {
 		internalError(c)
 		return
 	}
 	if result.RowsAffected() == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		var exists bool
+		db.Pool.QueryRow(c.Request.Context(),
+			`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, userID,
+		).Scan(&exists)
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": "user must be inactive before deletion"})
 		return
 	}
 

@@ -112,14 +112,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 					dataSources.POST("", tenant.CreateDataSource)
 					dataSources.PATCH("/:did", tenant.UpdateDataSource)
 				}
-
-				// End Users
-				endUsers := tenantGroup.Group("/end-users")
-				{
-					endUsers.POST("", append(tenantChain("tenant_admin"), tenant.CreateEndUser)...)
-					endUsers.GET("/lookup/phone/:number", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByPhone)...)
-					endUsers.GET("/lookup/national-id/:nid", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByNationalID)...)
-				}
 			}
 		}
 
