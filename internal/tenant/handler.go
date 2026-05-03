@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/UNagent-1D/Tenant/config"
@@ -15,15 +17,45 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+func internalError(c *gin.Context) {
+	c.JSON(http.StatusInternalServerError, gin.H{
+		"error":      "internal server error",
+		"request_id": c.GetString("request_id"),
+	})
+}
+
+func parsePagination(c *gin.Context) (page, limit, offset int) {
+	page = 1
+	limit = 20
+	if p := c.Query("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if l := c.Query("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	offset = (page - 1) * limit
+	return
+}
+
 // ── Tenants ───────────────────────────────────────────────────────────────────
 
 func GetTenants(c *gin.Context) {
+	page, limit, offset := parsePagination(c)
+
+	var total int
+	db.Pool.QueryRow(c.Request.Context(), `SELECT COUNT(*) FROM tenants`).Scan(&total)
+
 	rows, err := db.Pool.Query(c.Request.Context(),
 		`SELECT id, slug, name, plan, status, branding_logo_url, branding_primary_color, created_at, updated_at
-		 FROM tenants ORDER BY created_at DESC`,
+		 FROM tenants ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+		limit, offset,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar tenants"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
@@ -33,12 +65,15 @@ func GetTenants(c *gin.Context) {
 		var t Tenant
 		if err := rows.Scan(&t.ID, &t.Slug, &t.Name, &t.Plan, &t.Status,
 			&t.BrandingLogoURL, &t.BrandingPrimaryColor, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer tenants"})
+			internalError(c)
 			return
 		}
 		tenants = append(tenants, t)
 	}
-	c.JSON(http.StatusOK, tenants)
+	c.JSON(http.StatusOK, gin.H{
+		"data":       tenants,
+		"pagination": Pagination{Page: page, Limit: limit, Total: total},
+	})
 }
 
 func GetTenant(c *gin.Context) {
@@ -52,22 +87,46 @@ func GetTenant(c *gin.Context) {
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Tenant no encontrado"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, t)
 }
 
+var reservedSlugs = map[string]bool{
+	"admin": true, "api": true, "www": true, "health": true,
+	"internal": true, "public": true, "static": true,
+}
+
 // CreateTenant inserts the tenant then provisions its schema.
-// cfg is needed by provisionTenantSchema to run golang-migrate.
 func CreateTenant(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req CreateTenantRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			errStr := err.Error()
+			switch {
+			case strings.Contains(errStr, "Slug"):
+				c.JSON(http.StatusBadRequest, gin.H{"error": "slug is required"})
+			case strings.Contains(errStr, "Name"):
+				c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+			case strings.Contains(errStr, "Plan"):
+				c.JSON(http.StatusBadRequest, gin.H{"error": "plan must be one of: free, starter, pro, enterprise"})
+			default:
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			}
+			return
+		}
+		for _, ch := range req.Slug {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "slug can only contain lowercase letters, numbers, and hyphens"})
+				return
+			}
+		}
+		if reservedSlugs[req.Slug] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "slug is reserved and cannot be used"})
 			return
 		}
 
@@ -83,21 +142,20 @@ func CreateTenant(cfg *config.Config) gin.HandlerFunc {
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				c.JSON(http.StatusConflict, gin.H{"error": "El slug ya existe"})
+				c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("a tenant with slug '%s' already exists", req.Slug)})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear tenant"})
+			internalError(c)
 			return
 		}
 
 		if err := provisionTenantSchema(c.Request.Context(), t.Slug, cfg); err != nil {
-			// Best-effort rollback of the tenant row
 			db.Pool.Exec(c.Request.Context(), "DELETE FROM tenants WHERE id = $1", t.ID)
 			if strings.Contains(err.Error(), "already exists") {
-				c.JSON(http.StatusConflict, gin.H{"error": "El schema del tenant ya existe"})
+				c.JSON(http.StatusConflict, gin.H{"error": "tenant schema already exists"})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al provisionar schema del tenant"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision tenant schema", "request_id": c.GetString("request_id")})
 			return
 		}
 
@@ -154,7 +212,7 @@ func UpdateTenant(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
 	setClauses = append(setClauses, "updated_at = NOW()")
@@ -173,10 +231,10 @@ func UpdateTenant(c *gin.Context) {
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Tenant no encontrado"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar tenant"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, t)
@@ -189,26 +247,26 @@ func GetChannels(c *gin.Context) {
 	schema := fmt.Sprintf("tenant_%s", slug)
 
 	rows, err := db.Pool.Query(c.Request.Context(),
-		fmt.Sprintf(`SELECT id, tenant_id, channel_type, channel_key, webhook_secret_ref, is_active
-		             FROM %s.channels`, schema),
+		fmt.Sprintf(`SELECT id, tenant_id, channel_type, channel_key, is_active, created_at, updated_at
+		             FROM %s.channels ORDER BY created_at DESC`, schema),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar canales"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
 
-	channels := []Channel{}
+	channels := []ChannelListItem{}
 	for rows.Next() {
-		var ch Channel
+		var ch ChannelListItem
 		if err := rows.Scan(&ch.ID, &ch.TenantID, &ch.ChannelType, &ch.ChannelKey,
-			&ch.WebhookSecretRef, &ch.IsActive); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer canales"})
+			&ch.IsActive, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
+			internalError(c)
 			return
 		}
 		channels = append(channels, ch)
 	}
-	c.JSON(http.StatusOK, channels)
+	c.JSON(http.StatusOK, gin.H{"data": channels})
 }
 
 func CreateChannel(c *gin.Context) {
@@ -218,7 +276,15 @@ func CreateChannel(c *gin.Context) {
 
 	var req CreateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		errStr := err.Error()
+		switch {
+		case strings.Contains(errStr, "ChannelType"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "channel_type must be one of: whatsapp, web_widget"})
+		case strings.Contains(errStr, "ChannelKey"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "channel_key is required"})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
@@ -226,12 +292,17 @@ func CreateChannel(c *gin.Context) {
 	err := db.Pool.QueryRow(c.Request.Context(),
 		fmt.Sprintf(`INSERT INTO %s.channels (tenant_id, channel_type, channel_key, webhook_secret_ref)
 		             VALUES ($1, $2, $3, $4)
-		             RETURNING id, tenant_id, channel_type, channel_key, webhook_secret_ref, is_active`, schema),
+		             RETURNING id, tenant_id, channel_type, channel_key, webhook_secret_ref, is_active, created_at, updated_at`, schema),
 		tenantID, req.ChannelType, req.ChannelKey, req.WebhookSecretRef,
-	).Scan(&ch.ID, &ch.TenantID, &ch.ChannelType, &ch.ChannelKey, &ch.WebhookSecretRef, &ch.IsActive)
+	).Scan(&ch.ID, &ch.TenantID, &ch.ChannelType, &ch.ChannelKey, &ch.WebhookSecretRef, &ch.IsActive, &ch.CreatedAt, &ch.UpdatedAt)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear canal"})
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("a channel with key '%s' already exists for this tenant", req.ChannelKey)})
+			return
+		}
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusCreated, ch)
@@ -267,27 +338,28 @@ func UpdateChannel(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
+	setClauses = append(setClauses, "updated_at = NOW()")
 	args = append(args, c.Param("cid"))
 
 	query := fmt.Sprintf(
 		`UPDATE %s.channels SET %s WHERE id = $%d
-		 RETURNING id, tenant_id, channel_type, channel_key, webhook_secret_ref, is_active`,
+		 RETURNING id, tenant_id, channel_type, channel_key, webhook_secret_ref, is_active, created_at, updated_at`,
 		schema, strings.Join(setClauses, ", "), i,
 	)
 
 	var ch Channel
 	err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
-		&ch.ID, &ch.TenantID, &ch.ChannelType, &ch.ChannelKey, &ch.WebhookSecretRef, &ch.IsActive,
+		&ch.ID, &ch.TenantID, &ch.ChannelType, &ch.ChannelKey, &ch.WebhookSecretRef, &ch.IsActive, &ch.CreatedAt, &ch.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Canal no encontrado"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar canal"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, ch)
@@ -301,11 +373,11 @@ func GetProfiles(c *gin.Context) {
 
 	rows, err := db.Pool.Query(c.Request.Context(),
 		fmt.Sprintf(`SELECT id, name, description, scheduling_flow_rules, escalation_rules,
-		                    allowed_specialties, allowed_locations, agent_config_id
-		             FROM %s.agent_profiles`, schema),
+		                    allowed_specialties, allowed_locations, agent_config_id, created_at, updated_at
+		             FROM %s.agent_profiles ORDER BY created_at DESC`, schema),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar perfiles"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
@@ -314,13 +386,14 @@ func GetProfiles(c *gin.Context) {
 	for rows.Next() {
 		var p AgentProfile
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.SchedulingFlowRules,
-			&p.EscalationRules, &p.AllowedSpecialties, &p.AllowedLocations, &p.AgentConfigID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer perfiles"})
+			&p.EscalationRules, &p.AllowedSpecialties, &p.AllowedLocations, &p.AgentConfigID,
+			&p.CreatedAt, &p.UpdatedAt); err != nil {
+			internalError(c)
 			return
 		}
 		profiles = append(profiles, p)
 	}
-	c.JSON(http.StatusOK, profiles)
+	c.JSON(http.StatusOK, gin.H{"data": profiles})
 }
 
 func CreateProfile(c *gin.Context) {
@@ -329,7 +402,15 @@ func CreateProfile(c *gin.Context) {
 
 	var req CreateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	if len(req.AllowedSpecialties) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "allowed_specialties must have at least one entry"})
+		return
+	}
+	if len(req.AllowedLocations) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "allowed_locations must have at least one entry"})
 		return
 	}
 
@@ -339,14 +420,15 @@ func CreateProfile(c *gin.Context) {
 		             (name, description, scheduling_flow_rules, escalation_rules, allowed_specialties, allowed_locations)
 		             VALUES ($1, $2, $3, $4, $5, $6)
 		             RETURNING id, name, description, scheduling_flow_rules, escalation_rules,
-		                       allowed_specialties, allowed_locations, agent_config_id`, schema),
+		                       allowed_specialties, allowed_locations, agent_config_id, created_at, updated_at`, schema),
 		req.Name, req.Description, req.SchedulingFlowRules, req.EscalationRules,
 		req.AllowedSpecialties, req.AllowedLocations,
 	).Scan(&p.ID, &p.Name, &p.Description, &p.SchedulingFlowRules,
-		&p.EscalationRules, &p.AllowedSpecialties, &p.AllowedLocations, &p.AgentConfigID)
+		&p.EscalationRules, &p.AllowedSpecialties, &p.AllowedLocations, &p.AgentConfigID,
+		&p.CreatedAt, &p.UpdatedAt)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear perfil"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusCreated, p)
@@ -397,15 +479,16 @@ func UpdateProfile(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
+	setClauses = append(setClauses, "updated_at = NOW()")
 	args = append(args, c.Param("pid"))
 
 	query := fmt.Sprintf(
 		`UPDATE %s.agent_profiles SET %s WHERE id = $%d
 		 RETURNING id, name, description, scheduling_flow_rules, escalation_rules,
-		           allowed_specialties, allowed_locations, agent_config_id`,
+		           allowed_specialties, allowed_locations, agent_config_id, created_at, updated_at`,
 		schema, strings.Join(setClauses, ", "), i,
 	)
 
@@ -413,13 +496,14 @@ func UpdateProfile(c *gin.Context) {
 	err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
 		&p.ID, &p.Name, &p.Description, &p.SchedulingFlowRules,
 		&p.EscalationRules, &p.AllowedSpecialties, &p.AllowedLocations, &p.AgentConfigID,
+		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Perfil no encontrado"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "profile not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar perfil"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, p)
@@ -431,6 +515,19 @@ func GetConfigs(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
 	schema := fmt.Sprintf("tenant_%s", slug)
 
+	var exists bool
+	if err := db.Pool.QueryRow(c.Request.Context(),
+		fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s.agent_profiles WHERE id = $1)`, schema),
+		c.Param("pid"),
+	).Scan(&exists); err != nil {
+		internalError(c)
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "profile not found"})
+		return
+	}
+
 	rows, err := db.Pool.Query(c.Request.Context(),
 		fmt.Sprintf(`SELECT id, agent_profile_id, version, status, conversation_policy, escalation_rules,
 		                    tool_permissions, llm_params, channel_format_rules, created_by, created_at, activated_at
@@ -438,7 +535,7 @@ func GetConfigs(c *gin.Context) {
 		c.Param("pid"),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar configs"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
@@ -449,12 +546,12 @@ func GetConfigs(c *gin.Context) {
 		if err := rows.Scan(&cfg.ID, &cfg.AgentProfileID, &cfg.Version, &cfg.Status,
 			&cfg.ConversationPolicy, &cfg.EscalationRules, &cfg.ToolPermissions, &cfg.LLMParams,
 			&cfg.ChannelFormatRules, &cfg.CreatedBy, &cfg.CreatedAt, &cfg.ActivatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer configs"})
+			internalError(c)
 			return
 		}
 		configs = append(configs, cfg)
 	}
-	c.JSON(http.StatusOK, configs)
+	c.JSON(http.StatusOK, gin.H{"data": configs})
 }
 
 func GetActiveConfig(c *gin.Context) {
@@ -473,10 +570,10 @@ func GetActiveConfig(c *gin.Context) {
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "No hay config activa para este perfil"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "no active config found for this profile"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, cfg)
@@ -489,7 +586,19 @@ func CreateConfig(c *gin.Context) {
 
 	var req CreateAgentConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		errStr := err.Error()
+		switch {
+		case strings.Contains(errStr, "ConversationPolicy"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_policy is required"})
+		case strings.Contains(errStr, "EscalationRules"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "escalation_rules is required"})
+		case strings.Contains(errStr, "ToolPermissions"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tool_permissions must have at least one entry"})
+		case strings.Contains(errStr, "LLMParams"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "llm_params is required"})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
 		return
 	}
 	if err := validateLLMParams(req.LLMParams); err != nil {
@@ -498,6 +607,27 @@ func CreateConfig(c *gin.Context) {
 	}
 	if err := validateEscalationRules(req.EscalationRules); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.ToolPermissions) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tool_permissions must have at least one entry"})
+		return
+	}
+	if err := validateToolPermissions(c, req.ToolPermissions); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var profileExists bool
+	if err := db.Pool.QueryRow(c.Request.Context(),
+		fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s.agent_profiles WHERE id = $1)`, schema),
+		c.Param("pid"),
+	).Scan(&profileExists); err != nil {
+		internalError(c)
+		return
+	}
+	if !profileExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "profile not found"})
 		return
 	}
 
@@ -521,7 +651,7 @@ func CreateConfig(c *gin.Context) {
 		&agentCfg.ChannelFormatRules, &agentCfg.CreatedBy, &agentCfg.CreatedAt, &agentCfg.ActivatedAt)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear config"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusCreated, agentCfg)
@@ -547,6 +677,24 @@ func UpdateConfig(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+	}
+
+	var configStatus string
+	err := db.Pool.QueryRow(c.Request.Context(),
+		fmt.Sprintf(`SELECT status FROM %s.agent_configs WHERE id = $1`, schema),
+		c.Param("cid"),
+	).Scan(&configStatus)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+			return
+		}
+		internalError(c)
+		return
+	}
+	if configStatus != "draft" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only draft configs can be updated"})
+		return
 	}
 
 	setClauses := []string{}
@@ -579,30 +727,25 @@ func UpdateConfig(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
 	args = append(args, c.Param("cid"))
 
 	query := fmt.Sprintf(
-		`UPDATE %s.agent_configs SET %s WHERE id = $%d AND status = 'draft'
+		`UPDATE %s.agent_configs SET %s WHERE id = $%d
 		 RETURNING id, agent_profile_id, version, status, conversation_policy, escalation_rules,
 		           tool_permissions, llm_params, channel_format_rules, created_by, created_at, activated_at`,
 		schema, strings.Join(setClauses, ", "), i,
 	)
 
 	var agentCfg AgentConfig
-	err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
+	if err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
 		&agentCfg.ID, &agentCfg.AgentProfileID, &agentCfg.Version, &agentCfg.Status,
 		&agentCfg.ConversationPolicy, &agentCfg.EscalationRules, &agentCfg.ToolPermissions, &agentCfg.LLMParams,
 		&agentCfg.ChannelFormatRules, &agentCfg.CreatedBy, &agentCfg.CreatedAt, &agentCfg.ActivatedAt,
-	)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Config no encontrada o no está en estado draft"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar config"})
+	); err != nil {
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, agentCfg)
@@ -616,10 +759,28 @@ func ActivateConfig(c *gin.Context) {
 
 	tx, err := db.Pool.Begin(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al iniciar transacción"})
+		internalError(c)
 		return
 	}
 	defer tx.Rollback(c.Request.Context())
+
+	var configStatus string
+	err = tx.QueryRow(c.Request.Context(),
+		fmt.Sprintf(`SELECT status FROM %s.agent_configs WHERE id = $1`, schema),
+		configID,
+	).Scan(&configStatus)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+			return
+		}
+		internalError(c)
+		return
+	}
+	if configStatus != "draft" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only a draft config can be activated"})
+		return
+	}
 
 	tx.Exec(c.Request.Context(),
 		fmt.Sprintf(`UPDATE %s.agent_configs SET status = 'archived' WHERE agent_profile_id = $1 AND status = 'active'`, schema),
@@ -629,7 +790,7 @@ func ActivateConfig(c *gin.Context) {
 	var agentCfg AgentConfig
 	err = tx.QueryRow(c.Request.Context(),
 		fmt.Sprintf(`UPDATE %s.agent_configs SET status = 'active', activated_at = NOW()
-		             WHERE id = $1 AND status = 'draft'
+		             WHERE id = $1
 		             RETURNING id, agent_profile_id, version, status, conversation_policy, escalation_rules,
 		                       tool_permissions, llm_params, channel_format_rules, created_by, created_at, activated_at`, schema),
 		configID,
@@ -638,11 +799,7 @@ func ActivateConfig(c *gin.Context) {
 		&agentCfg.ChannelFormatRules, &agentCfg.CreatedBy, &agentCfg.CreatedAt, &agentCfg.ActivatedAt)
 
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Config no encontrada o no está en estado draft"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al activar config"})
+		internalError(c)
 		return
 	}
 
@@ -652,10 +809,32 @@ func ActivateConfig(c *gin.Context) {
 	)
 
 	if err = tx.Commit(c.Request.Context()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al confirmar transacción"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, agentCfg)
+}
+
+func validateToolPermissions(c *gin.Context, raw json.RawMessage) error {
+	var entries []struct {
+		ToolName string `json:"tool_name"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return fmt.Errorf("tool_permissions must be a JSON array")
+	}
+	for _, e := range entries {
+		var isActive bool
+		err := db.Pool.QueryRow(c.Request.Context(),
+			`SELECT is_active FROM tool_registry WHERE name = $1`, e.ToolName,
+		).Scan(&isActive)
+		if err != nil {
+			return fmt.Errorf("tool '%s' is not registered in the tool registry", e.ToolName)
+		}
+		if !isActive {
+			return fmt.Errorf("tool '%s' is currently deactivated globally", e.ToolName)
+		}
+	}
+	return nil
 }
 
 func validateLLMParams(raw json.RawMessage) error {
@@ -665,28 +844,30 @@ func validateLLMParams(raw json.RawMessage) error {
 		MaxTokens   int     `json:"max_tokens"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return fmt.Errorf("llm_params inválido")
+		return fmt.Errorf("llm_params is invalid JSON")
 	}
 	allowed := map[string]bool{"gpt-4o": true, "gpt-4o-mini": true}
 	if !allowed[p.Model] {
-		return fmt.Errorf("modelo no permitido: %s", p.Model)
+		return fmt.Errorf("model '%s' is not in the allowed model list", p.Model)
 	}
 	if p.Temperature < 0 || p.Temperature > 2 {
-		return fmt.Errorf("temperature debe estar entre 0.0 y 2.0")
+		return fmt.Errorf("temperature must be between 0.0 and 2.0")
 	}
 	if p.MaxTokens < 1 || p.MaxTokens > 4096 {
-		return fmt.Errorf("max_tokens debe estar entre 1 y 4096")
+		return fmt.Errorf("max_tokens must be between 1 and 4096")
 	}
 	return nil
 }
 
 func validateEscalationRules(raw json.RawMessage) error {
-	var rules []any
-	if err := json.Unmarshal(raw, &rules); err != nil {
-		return fmt.Errorf("escalation_rules debe ser un array JSON")
+	var rules struct {
+		Triggers []any `json:"triggers"`
 	}
-	if len(rules) == 0 {
-		return fmt.Errorf("debe haber al menos una regla de escalación")
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		return fmt.Errorf("escalation_rules is invalid JSON")
+	}
+	if len(rules.Triggers) == 0 {
+		return fmt.Errorf("escalation_rules must have at least one trigger")
 	}
 	return nil
 }
@@ -698,11 +879,11 @@ func GetDataSources(c *gin.Context) {
 	schema := fmt.Sprintf("tenant_%s", slug)
 
 	rows, err := db.Pool.Query(c.Request.Context(),
-		fmt.Sprintf(`SELECT id, name, source_type, base_url, credential_ref, route_configs, is_active
-		             FROM %s.data_sources`, schema),
+		fmt.Sprintf(`SELECT id, name, source_type, base_url, credential_ref, route_configs, is_active, created_at, updated_at
+		             FROM %s.data_sources ORDER BY created_at DESC`, schema),
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar data sources"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
@@ -711,13 +892,13 @@ func GetDataSources(c *gin.Context) {
 	for rows.Next() {
 		var ds DataSource
 		if err := rows.Scan(&ds.ID, &ds.Name, &ds.SourceType, &ds.BaseURL,
-			&ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer data sources"})
+			&ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive, &ds.CreatedAt, &ds.UpdatedAt); err != nil {
+			internalError(c)
 			return
 		}
 		sources = append(sources, ds)
 	}
-	c.JSON(http.StatusOK, sources)
+	c.JSON(http.StatusOK, gin.H{"data": sources})
 }
 
 func CreateDataSource(c *gin.Context) {
@@ -726,7 +907,28 @@ func CreateDataSource(c *gin.Context) {
 
 	var req CreateDataSourceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		errStr := err.Error()
+		switch {
+		case strings.Contains(errStr, "Name"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		case strings.Contains(errStr, "SourceType"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "source_type must be one of: scheduling, patient_registry"})
+		case strings.Contains(errStr, "BaseURL"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "base_url must be a valid URL"})
+		case strings.Contains(errStr, "RouteConfigs"):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "route_configs must have at least one operation"})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	if u, err := url.ParseRequestURI(req.BaseURL); err != nil || u.Host == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "base_url must be a valid URL"})
+		return
+	}
+	var routeMap map[string]any
+	if err := json.Unmarshal(req.RouteConfigs, &routeMap); err != nil || len(routeMap) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "route_configs must have at least one operation"})
 		return
 	}
 
@@ -734,12 +936,12 @@ func CreateDataSource(c *gin.Context) {
 	err := db.Pool.QueryRow(c.Request.Context(),
 		fmt.Sprintf(`INSERT INTO %s.data_sources (name, source_type, base_url, credential_ref, route_configs)
 		             VALUES ($1, $2, $3, $4, $5)
-		             RETURNING id, name, source_type, base_url, credential_ref, route_configs, is_active`, schema),
+		             RETURNING id, name, source_type, base_url, credential_ref, route_configs, is_active, created_at, updated_at`, schema),
 		req.Name, req.SourceType, req.BaseURL, req.CredentialRef, req.RouteConfigs,
-	).Scan(&ds.ID, &ds.Name, &ds.SourceType, &ds.BaseURL, &ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive)
+	).Scan(&ds.ID, &ds.Name, &ds.SourceType, &ds.BaseURL, &ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive, &ds.CreatedAt, &ds.UpdatedAt)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear data source"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusCreated, ds)
@@ -775,27 +977,28 @@ func UpdateDataSource(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
+	setClauses = append(setClauses, "updated_at = NOW()")
 	args = append(args, c.Param("did"))
 
 	query := fmt.Sprintf(
 		`UPDATE %s.data_sources SET %s WHERE id = $%d
-		 RETURNING id, name, source_type, base_url, credential_ref, route_configs, is_active`,
+		 RETURNING id, name, source_type, base_url, credential_ref, route_configs, is_active, created_at, updated_at`,
 		schema, strings.Join(setClauses, ", "), i,
 	)
 
 	var ds DataSource
 	err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
-		&ds.ID, &ds.Name, &ds.SourceType, &ds.BaseURL, &ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive,
+		&ds.ID, &ds.Name, &ds.SourceType, &ds.BaseURL, &ds.CredentialRef, &ds.RouteConfigs, &ds.IsActive, &ds.CreatedAt, &ds.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Data source no encontrado"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "data source not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar data source"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, ds)
@@ -805,10 +1008,11 @@ func UpdateDataSource(c *gin.Context) {
 
 func GetTools(c *gin.Context) {
 	rows, err := db.Pool.Query(c.Request.Context(),
-		`SELECT id, name, description, openai_function_def, is_active FROM tool_registry ORDER BY name`,
+		`SELECT id, name, description, openai_function_def, is_active, created_at, updated_at
+		 FROM tool_registry ORDER BY name`,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al listar herramientas"})
+		internalError(c)
 		return
 	}
 	defer rows.Close()
@@ -816,13 +1020,13 @@ func GetTools(c *gin.Context) {
 	tools := []Tool{}
 	for rows.Next() {
 		var t Tool
-		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al leer herramientas"})
+		if err := rows.Scan(&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			internalError(c)
 			return
 		}
 		tools = append(tools, t)
 	}
-	c.JSON(http.StatusOK, tools)
+	c.JSON(http.StatusOK, gin.H{"data": tools})
 }
 
 func CreateTool(c *gin.Context) {
@@ -836,17 +1040,17 @@ func CreateTool(c *gin.Context) {
 	err := db.Pool.QueryRow(c.Request.Context(),
 		`INSERT INTO tool_registry (name, description, openai_function_def)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, name, description, openai_function_def, is_active`,
+		 RETURNING id, name, description, openai_function_def, is_active, created_at, updated_at`,
 		req.Name, req.Description, req.OpenAIFunctionDef,
-	).Scan(&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive)
+	).Scan(&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive, &t.CreatedAt, &t.UpdatedAt)
 
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Ya existe una herramienta con ese nombre"})
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("a tool with name '%s' already exists", req.Name)})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al crear herramienta"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusCreated, t)
@@ -874,99 +1078,28 @@ func UpdateTool(c *gin.Context) {
 		i++
 	}
 	if len(setClauses) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sin campos para actualizar"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
+	setClauses = append(setClauses, "updated_at = NOW()")
 	args = append(args, c.Param("tid"))
 
 	query := fmt.Sprintf(
-		"UPDATE tool_registry SET %s WHERE id = $%d RETURNING id, name, description, openai_function_def, is_active",
+		"UPDATE tool_registry SET %s WHERE id = $%d RETURNING id, name, description, openai_function_def, is_active, created_at, updated_at",
 		strings.Join(setClauses, ", "), i,
 	)
 
 	var t Tool
 	err := db.Pool.QueryRow(c.Request.Context(), query, args...).Scan(
-		&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive,
+		&t.ID, &t.Name, &t.Description, &t.OpenAIFunctionDef, &t.IsActive, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Herramienta no encontrada"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "tool not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al actualizar herramienta"})
+		internalError(c)
 		return
 	}
 	c.JSON(http.StatusOK, t)
-}
-
-// ── End Users ─────────────────────────────────────────────────────────────────
-
-func CreateEndUser(c *gin.Context) {
-	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
-	tenantID := c.Param("id")
-
-	var req CreateEndUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var eu EndUser
-	err := db.Pool.QueryRow(c.Request.Context(),
-		fmt.Sprintf(`INSERT INTO %s.end_users (tenant_id, full_name, national_id, cellphone, email, date_of_birth, external_ref)
-		             VALUES ($1, $2, $3, $4, $5, $6, $7)
-		             RETURNING id, tenant_id, full_name, national_id, cellphone, email, is_active, external_ref, created_at`, schema),
-		tenantID, req.FullName, req.NationalID, req.Cellphone, req.Email, req.DateOfBirth, req.ExternalRef,
-	).Scan(&eu.ID, &eu.TenantID, &eu.FullName, &eu.NationalID, &eu.Cellphone,
-		&eu.Email, &eu.IsActive, &eu.ExternalRef, &eu.CreatedAt)
-
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			c.JSON(http.StatusConflict, gin.H{"error": "national_id o cellphone ya registrado para este tenant"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error al registrar usuario final"})
-		return
-	}
-	c.JSON(http.StatusCreated, eu)
-}
-
-// LookupByPhone always returns 200 to prevent enumeration attacks.
-func LookupByPhone(c *gin.Context) {
-	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
-	tenantID := c.Param("id")
-
-	var id string
-	err := db.Pool.QueryRow(c.Request.Context(),
-		fmt.Sprintf(`SELECT id FROM %s.end_users WHERE tenant_id = $1 AND cellphone = $2 AND is_active = true`, schema),
-		tenantID, c.Param("number"),
-	).Scan(&id)
-
-	if err != nil {
-		c.JSON(http.StatusOK, LookupResponse{Exists: false})
-		return
-	}
-	c.JSON(http.StatusOK, LookupResponse{Exists: true, UserID: &id})
-}
-
-// LookupByNationalID always returns 200 to prevent enumeration attacks.
-func LookupByNationalID(c *gin.Context) {
-	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
-	tenantID := c.Param("id")
-
-	var id string
-	err := db.Pool.QueryRow(c.Request.Context(),
-		fmt.Sprintf(`SELECT id FROM %s.end_users WHERE tenant_id = $1 AND national_id = $2 AND is_active = true`, schema),
-		tenantID, c.Param("nid"),
-	).Scan(&id)
-
-	if err != nil {
-		c.JSON(http.StatusOK, LookupResponse{Exists: false})
-		return
-	}
-	c.JSON(http.StatusOK, LookupResponse{Exists: true, UserID: &id})
 }

@@ -139,10 +139,9 @@ func skipIfNoDB(t *testing.T) {
 // ─── 1. Public routes ─────────────────────────────────────────────────────────
 
 func TestHealth(t *testing.T) {
-	w := req(t, http.MethodGet, "/health", nil, "")
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("health must not require auth, got %d", w.Code)
-	}
+	skipIfNoDB(t)
+	w := req(t, http.MethodGet, "/api/v1/health", nil, "")
+	assertStatus(t, w.Code, http.StatusOK)
 }
 
 func TestLogin_BadPayload(t *testing.T) {
@@ -157,7 +156,7 @@ func TestLogin_BadPayload(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := req(t, http.MethodPost, "/auth/login", tc.body, "")
+			w := req(t, http.MethodPost, "/api/v1/auth/login", tc.body, "")
 			assertStatus(t, w.Code, http.StatusBadRequest)
 		})
 	}
@@ -180,9 +179,6 @@ func TestUnauthenticated(t *testing.T) {
 		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs/active"},
 		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/data-sources"},
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/data-sources"},
-		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/end-users"},
-		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/end-users/lookup/phone/+573001234567"},
-		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/end-users/lookup/national-id/12345678"},
 		{http.MethodGet, "/api/v1/users"},
 		{http.MethodPost, "/api/v1/users"},
 		{http.MethodGet, "/api/v1/tool-registry"},
@@ -243,7 +239,6 @@ func TestRoleEnforcement(t *testing.T) {
 		{"operator GET all tenants", tenantAOperTok, http.MethodGet, "/api/v1/tenants"},
 		{"operator GET all users", tenantAOperTok, http.MethodGet, "/api/v1/users"},
 		{"tenant_admin GET all tenants", tenantAAdminTok, http.MethodGet, "/api/v1/tenants"},
-		{"tenant_admin GET all users", tenantAAdminTok, http.MethodGet, "/api/v1/users"},
 		{"tenant_admin POST tool", tenantAAdminTok, http.MethodPost, "/api/v1/tool-registry"},
 		{"tenant_admin PATCH tool", tenantAAdminTok, http.MethodPatch, "/api/v1/tool-registry/" + testToolID},
 	}
@@ -269,8 +264,6 @@ func TestCrossTenantEnforcement(t *testing.T) {
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"},
 		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/data-sources"},
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/data-sources"},
-		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/end-users"},
-		{http.MethodGet, "/api/v1/tenants/" + testTenantAID + "/end-users/lookup/phone/+57300"},
 	}
 	for _, r := range routes {
 		t.Run(r.method+" "+r.path, func(t *testing.T) {
@@ -323,6 +316,7 @@ func TestCreateUser_Validation(t *testing.T) {
 }
 
 func TestCreateChannel_Validation(t *testing.T) {
+	skipIfNoDB(t)
 	cases := []struct {
 		name string
 		body any
@@ -335,14 +329,13 @@ func TestCreateChannel_Validation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, "/api/v1/tenants/"+testTenantAID+"/channels", tc.body, tenantAAdminTok)
-			if w.Code != http.StatusBadRequest && w.Code != http.StatusNotFound && w.Code != http.StatusInternalServerError {
-				t.Errorf("expected 4xx or 5xx (no DB), got %d", w.Code)
-			}
+			assertStatus(t, w.Code, http.StatusBadRequest)
 		})
 	}
 }
 
 func TestCreateDataSource_Validation(t *testing.T) {
+	skipIfNoDB(t)
 	cases := []struct {
 		name string
 		body any
@@ -356,14 +349,13 @@ func TestCreateDataSource_Validation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, "/api/v1/tenants/"+testTenantAID+"/data-sources", tc.body, tenantAAdminTok)
-			if w.Code == http.StatusOK || w.Code == http.StatusCreated {
-				t.Errorf("expected non-success, got %d", w.Code)
-			}
+			assertStatus(t, w.Code, http.StatusBadRequest)
 		})
 	}
 }
 
 func TestCreateAgentConfig_Validation(t *testing.T) {
+	skipIfNoDB(t)
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
 	cases := []struct {
 		name string
@@ -384,9 +376,7 @@ func TestCreateAgentConfig_Validation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, path, tc.body, tenantAAdminTok)
-			if w.Code == http.StatusCreated {
-				t.Errorf("expected non-201, got %d", w.Code)
-			}
+			assertStatus(t, w.Code, http.StatusBadRequest)
 		})
 	}
 }
@@ -394,6 +384,7 @@ func TestCreateAgentConfig_Validation(t *testing.T) {
 // ─── 6. LLM params validation ─────────────────────────────────────────────────
 
 func TestLLMParamsValidation(t *testing.T) {
+	skipIfNoDB(t)
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
 
 	makeBody := func(model string, temp float64, maxTokens int) map[string]any {
@@ -423,16 +414,13 @@ func TestLLMParamsValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := req(t, http.MethodPost, path, tc.body, tenantAAdminTok)
-			if db.Pool != nil {
-				assertStatus(t, w.Code, tc.want)
-			} else if w.Code == http.StatusCreated || w.Code == http.StatusOK {
-				t.Errorf("validation must reject invalid llm_params, got %d", w.Code)
-			}
+			assertStatus(t, w.Code, tc.want)
 		})
 	}
 }
 
 func TestEscalationRulesValidation(t *testing.T) {
+	skipIfNoDB(t)
 	path := "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"
 	body := map[string]any{
 		"conversation_policy": map[string]any{},
@@ -441,45 +429,17 @@ func TestEscalationRulesValidation(t *testing.T) {
 		"llm_params":          map[string]any{"model": "gpt-4o", "temperature": 0.5, "max_tokens": 512},
 	}
 	w := req(t, http.MethodPost, path, body, tenantAAdminTok)
-	if db.Pool != nil {
-		assertStatus(t, w.Code, http.StatusBadRequest)
-	} else if w.Code == http.StatusCreated {
-		t.Error("empty escalation_rules must not be accepted")
-	}
+	assertStatus(t, w.Code, http.StatusBadRequest)
 }
 
-// ─── 7. CreateEndUser validation ──────────────────────────────────────────────
-
-func TestCreateEndUser_Validation(t *testing.T) {
-	path := "/api/v1/tenants/" + testTenantAID + "/end-users"
-	cases := []struct {
-		name string
-		body any
-	}{
-		{"empty body", nil},
-		{"missing full_name", map[string]string{"national_id": "123", "cellphone": "+57300"}},
-		{"missing national_id", map[string]string{"full_name": "Juan", "cellphone": "+57300"}},
-		{"missing cellphone", map[string]string{"full_name": "Juan", "national_id": "123"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			w := req(t, http.MethodPost, path, tc.body, tenantAAdminTok)
-			if w.Code == http.StatusCreated {
-				t.Errorf("must reject missing required fields, got 201")
-			}
-		})
-	}
-}
-
-// ─── 8. Operator read-only scope ──────────────────────────────────────────────
+// ─── 7. Operator read-only scope ──────────────────────────────────────────────
 
 func TestOperatorReadOnly(t *testing.T) {
+	skipIfNoDB(t)
 	reads := []string{
 		"/api/v1/tenants/" + testTenantAID + "/profiles",
 		"/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs",
 		"/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs/active",
-		"/api/v1/tenants/" + testTenantAID + "/end-users/lookup/phone/+57300",
-		"/api/v1/tenants/" + testTenantAID + "/end-users/lookup/national-id/123",
 	}
 	for _, path := range reads {
 		t.Run(path, func(t *testing.T) {
@@ -495,7 +455,6 @@ func TestOperatorReadOnly(t *testing.T) {
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/profiles"},
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/profiles/" + testProfileID + "/configs"},
 		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/data-sources"},
-		{http.MethodPost, "/api/v1/tenants/" + testTenantAID + "/end-users"},
 	}
 	for _, r := range writes {
 		t.Run("DENY "+r.method+" "+r.path, func(t *testing.T) {
@@ -510,7 +469,7 @@ func TestOperatorReadOnly(t *testing.T) {
 func TestIntegration_Login(t *testing.T) {
 	skipIfNoDB(t)
 	t.Run("success", func(t *testing.T) {
-		w := req(t, http.MethodPost, "/auth/login",
+		w := req(t, http.MethodPost, "/api/v1/auth/login",
 			map[string]string{"email": "admin@test.internal", "password": "Test1234!"}, "")
 		assertStatus(t, w.Code, http.StatusOK)
 		var body map[string]string
@@ -520,12 +479,12 @@ func TestIntegration_Login(t *testing.T) {
 		}
 	})
 	t.Run("wrong password", func(t *testing.T) {
-		w := req(t, http.MethodPost, "/auth/login",
+		w := req(t, http.MethodPost, "/api/v1/auth/login",
 			map[string]string{"email": "admin@test.internal", "password": "wrong"}, "")
 		assertStatus(t, w.Code, http.StatusUnauthorized)
 	})
 	t.Run("unknown user", func(t *testing.T) {
-		w := req(t, http.MethodPost, "/auth/login",
+		w := req(t, http.MethodPost, "/api/v1/auth/login",
 			map[string]string{"email": "nobody@test.internal", "password": "pass"}, "")
 		assertStatus(t, w.Code, http.StatusUnauthorized)
 	})
@@ -617,7 +576,7 @@ func TestIntegration_UserCRUD(t *testing.T) {
 		assertStatus(t, w.Code, http.StatusCreated)
 		var body map[string]any
 		json.NewDecoder(w.Body).Decode(&body)
-		userID, _ = body["user_id"].(string)
+		userID, _ = body["id"].(string)
 	})
 
 	t.Run("duplicate email", func(t *testing.T) {
@@ -855,61 +814,6 @@ func TestIntegration_DataSourceCRUD(t *testing.T) {
 	})
 }
 
-func TestIntegration_EndUserLookup(t *testing.T) {
-	skipIfNoDB(t)
-
-	wt := req(t, http.MethodPost, "/api/v1/tenants", map[string]any{
-		"slug": "enduser-test-tenant",
-		"name": "EndUser Test Hospital",
-		"plan": "free",
-	}, appAdminToken)
-	var tenantResp map[string]any
-	json.NewDecoder(wt.Body).Decode(&tenantResp)
-	tenantID, _ := tenantResp["id"].(string)
-
-	t.Run("register end user", func(t *testing.T) {
-		w := req(t, http.MethodPost, "/api/v1/tenants/"+tenantID+"/end-users", map[string]any{
-			"full_name":   "Juan García",
-			"national_id": "12345678",
-			"cellphone":   "+573001234567",
-		}, appAdminToken)
-		assertStatus(t, w.Code, http.StatusCreated)
-	})
-
-	t.Run("lookup by phone: found", func(t *testing.T) {
-		w := req(t, http.MethodGet, "/api/v1/tenants/"+tenantID+"/end-users/lookup/phone/+573001234567", nil, appAdminToken)
-		assertStatus(t, w.Code, http.StatusOK)
-		var body map[string]any
-		json.NewDecoder(w.Body).Decode(&body)
-		if body["exists"] != true {
-			t.Error("expected exists:true")
-		}
-	})
-
-	t.Run("lookup by phone: not found — still 200", func(t *testing.T) {
-		w := req(t, http.MethodGet, "/api/v1/tenants/"+tenantID+"/end-users/lookup/phone/+57000000000", nil, appAdminToken)
-		assertStatus(t, w.Code, http.StatusOK)
-		var body map[string]any
-		json.NewDecoder(w.Body).Decode(&body)
-		if body["exists"] != false {
-			t.Error("expected exists:false")
-		}
-	})
-
-	t.Run("lookup by national id: found", func(t *testing.T) {
-		w := req(t, http.MethodGet, "/api/v1/tenants/"+tenantID+"/end-users/lookup/national-id/12345678", nil, appAdminToken)
-		assertStatus(t, w.Code, http.StatusOK)
-	})
-
-	t.Run("duplicate cellphone → 409", func(t *testing.T) {
-		w := req(t, http.MethodPost, "/api/v1/tenants/"+tenantID+"/end-users", map[string]any{
-			"full_name":   "Otro Juan",
-			"national_id": "99999999",
-			"cellphone":   "+573001234567",
-		}, appAdminToken)
-		assertStatus(t, w.Code, http.StatusConflict)
-	})
-}
 
 func TestIntegration_ToolRegistry(t *testing.T) {
 	skipIfNoDB(t)

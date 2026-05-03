@@ -38,12 +38,25 @@ type UpdateTenantRequest struct {
 // ── Channel ───────────────────────────────────────────────────────────────────
 
 type Channel struct {
-	ID               string  `json:"id"`
-	TenantID         string  `json:"tenant_id"`
-	ChannelType      string  `json:"channel_type"`
-	ChannelKey       string  `json:"channel_key"`
-	WebhookSecretRef *string `json:"webhook_secret_ref"`
-	IsActive         bool    `json:"is_active"`
+	ID               string    `json:"id"`
+	TenantID         string    `json:"tenant_id"`
+	ChannelType      string    `json:"channel_type"`
+	ChannelKey       string    `json:"channel_key"`
+	WebhookSecretRef *string   `json:"webhook_secret_ref"`
+	IsActive         bool      `json:"is_active"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// ChannelListItem is the list-response shape — omits webhook_secret_ref.
+type ChannelListItem struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	ChannelType string    `json:"channel_type"`
+	ChannelKey  string    `json:"channel_key"`
+	IsActive    bool      `json:"is_active"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type CreateChannelRequest struct {
@@ -69,6 +82,8 @@ type AgentProfile struct {
 	AllowedSpecialties  []string        `json:"allowed_specialties"`
 	AllowedLocations    []string        `json:"allowed_locations"`
 	AgentConfigID       *string         `json:"agent_config_id"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 type CreateProfileRequest struct {
@@ -99,6 +114,8 @@ type DataSource struct {
 	CredentialRef *string         `json:"credential_ref"`
 	RouteConfigs  json.RawMessage `json:"route_configs"`
 	IsActive      bool            `json:"is_active"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type CreateDataSourceRequest struct {
@@ -156,6 +173,16 @@ type Tool struct {
 	Description       *string         `json:"description"`
 	OpenAIFunctionDef json.RawMessage `json:"openai_function_def"`
 	IsActive          bool            `json:"is_active"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+}
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+
+type Pagination struct {
+	Page  int `json:"page"`
+	Limit int `json:"limit"`
+	Total int `json:"total"`
 }
 
 type CreateToolRequest struct {
@@ -169,42 +196,14 @@ type UpdateToolRequest struct {
 	IsActive    *bool   `json:"is_active"`
 }
 
-// ── EndUser ───────────────────────────────────────────────────────────────────
-
-type EndUser struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	FullName    string    `json:"full_name"`
-	NationalID  string    `json:"national_id"`
-	Cellphone   string    `json:"cellphone"`
-	Email       *string   `json:"email"`
-	IsActive    bool      `json:"is_active"`
-	ExternalRef *string   `json:"external_ref"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-type CreateEndUserRequest struct {
-	FullName    string  `json:"full_name"    binding:"required"`
-	NationalID  string  `json:"national_id"  binding:"required"`
-	Cellphone   string  `json:"cellphone"    binding:"required"`
-	Email       *string `json:"email"`
-	DateOfBirth *string `json:"date_of_birth"`
-	ExternalRef *string `json:"external_ref"`
-}
-
-type LookupResponse struct {
-	Exists bool    `json:"exists"`
-	UserID *string `json:"user_id,omitempty"`
-}
 
 // ── Execute (endpoint interno) ────────────────────────────────────────────────
 
 type ExecuteRequest struct {
-	DataSourceID string            `json:"data_source_id" binding:"required"`
-	Operation    string            `json:"operation"      binding:"required"`
-	PathParams   map[string]string `json:"path_params"`
-	QueryParams  map[string]string `json:"query_params"`
-	Body         map[string]any    `json:"body"`
+	Operation   string            `json:"operation"    binding:"required"`
+	PathParams  map[string]string `json:"path_params"`
+	QueryParams map[string]string `json:"query_params"`
+	Body        map[string]any    `json:"body"`
 }
 
 type ExecuteResponse struct {

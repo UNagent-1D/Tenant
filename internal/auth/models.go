@@ -19,6 +19,7 @@ type User struct {
 	Role         string
 	TenantID     *string
 	IsActive     bool
+	CreatedAt    time.Time
 }
 
 type Claims struct {
@@ -31,9 +32,14 @@ type Claims struct {
 
 type CreateUserRequest struct {
 	Email    string  `json:"email"    binding:"required,email"`
-	Password string  `json:"password" binding:"required,min=6"`
+	Password string  `json:"password" binding:"required,min=8"`
 	Role     string  `json:"role"     binding:"required,oneof=app_admin tenant_admin tenant_operator"`
 	TenantID *string `json:"tenant_id"`
+}
+
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password"     binding:"required,min=8"`
 }
 
 type UpdateUserRequest struct {
@@ -49,3 +55,4 @@ type UserResponse struct {
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 }
+

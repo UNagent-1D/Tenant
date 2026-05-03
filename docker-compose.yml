@@ -18,7 +18,7 @@ services:
       retries: 5
 
   migrate:
-    image: migrate/migrate:v4
+    image: migrate/migrate:v4.18.1
     env_file: .env
     volumes:
       - ./migrations/global:/migrations
@@ -53,7 +53,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
       GIN_MODE: ${GIN_MODE}
     ports:
-      - "8080:8080"
+      - "8082:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully

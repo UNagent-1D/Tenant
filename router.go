@@ -46,25 +46,31 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	router.Use(gin.Recovery())
 
 	// Public
-	router.POST("/auth/login", auth.LoginHandler(cfg))
-	router.GET("/health", HealthCheck)
+	router.POST("/api/v1/auth/login", auth.LoginHandler(cfg))
+	router.GET("/api/v1/health", HealthCheck)
 
 	api := router.Group("/api/v1")
 	api.Use(auth.AuthMiddleware(cfg))
 	{
+		// ── Auth (self) ───────────────────────────────────────────────────
+		api.GET("/auth/me", auth.GetMe)
+		api.PATCH("/auth/me/password", auth.ChangePassword)
+
 		// ── Users ─────────────────────────────────────────────────────────
 		users := api.Group("/users")
 		{
-			users.GET("", auth.RoleMiddleware("app_admin"), auth.GetUsers)
+			users.GET("", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.GetUsers)
 			users.POST("", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.CreateUser)
+			users.GET("/:uid", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.GetUser)
 			users.PATCH("/:uid", auth.RoleMiddleware("app_admin", "tenant_admin"), auth.UpdateUser)
+			users.DELETE("/:uid", auth.OnlyAdminMiddleware("only app_admin can delete users"), auth.DeleteUser)
 		}
 
 		// ── Tenants ───────────────────────────────────────────────────────
 		tenants := api.Group("/tenants")
 		{
-			tenants.GET("", auth.RoleMiddleware("app_admin"), tenant.GetTenants)
-			tenants.POST("", auth.RoleMiddleware("app_admin"), tenant.CreateTenant(cfg))
+			tenants.GET("", auth.OnlyAdminMiddleware("only app_admin can list all tenants"), tenant.GetTenants)
+			tenants.POST("", auth.OnlyAdminMiddleware("only app_admin can create tenants"), tenant.CreateTenant(cfg))
 
 			tenantGroup := tenants.Group("/:id")
 			{
@@ -106,14 +112,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 					dataSources.POST("", tenant.CreateDataSource)
 					dataSources.PATCH("/:did", tenant.UpdateDataSource)
 				}
-
-				// End Users
-				endUsers := tenantGroup.Group("/end-users")
-				{
-					endUsers.POST("", append(tenantChain("tenant_admin"), tenant.CreateEndUser)...)
-					endUsers.GET("/lookup/phone/:number", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByPhone)...)
-					endUsers.GET("/lookup/national-id/:nid", append(tenantChain("tenant_admin", "tenant_operator"), tenant.LookupByNationalID)...)
-				}
 			}
 		}
 
@@ -121,8 +119,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		tools := api.Group("/tool-registry")
 		{
 			tools.GET("", auth.RoleMiddleware("app_admin", "tenant_admin"), tenant.GetTools)
-			tools.POST("", auth.RoleMiddleware("app_admin"), tenant.CreateTool)
-			tools.PATCH("/:tid", auth.RoleMiddleware("app_admin"), tenant.UpdateTool)
+			tools.POST("", auth.OnlyAdminMiddleware("only app_admin can register tools"), tenant.CreateTool)
+			tools.PATCH("/:tid", auth.OnlyAdminMiddleware("only app_admin can modify tools"), tenant.UpdateTool)
 		}
 	}
 
@@ -130,7 +128,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	internal := router.Group("/api/v1/internal")
 	internal.Use(auth.InternalKeyMiddleware(cfg))
 	{
-		internal.POST("/:id/execute", tenant.ExecuteDataSource(cfg))
+		internal.POST("/tenants/:id/data-sources/:did/execute", tenant.ExecuteDataSource(cfg))
 	}
 
 	return router
