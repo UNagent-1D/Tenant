@@ -220,8 +220,9 @@ func SetupRouter() *gin.Engine {
 	// 3. Rutas Públicas (No requieren Token)
 	authGroup := router.Group("/auth")
 	{
-		// Recibe { "email": "", "password": "" } y emite un JWT firmado verificando contra SQL
-		authGroup.POST("/login", handlers.LoginHandler)
+		// Recibe { "email": "", "password": "" } y emite un JWT firmado verificando contra SQL.
+		// Rate-limited por IP para mitigar fuerza bruta / credential stuffing contra bcrypt.
+		authGroup.POST("/login", middlewares.LoginRateLimiter(), handlers.LoginHandler)
 	}
 
 	// 4. API protegida general (El AuthMiddleware obliga la presencia de JWT válido)
