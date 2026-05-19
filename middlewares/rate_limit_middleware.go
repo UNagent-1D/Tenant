@@ -15,6 +15,9 @@ package middlewares
 // without touching the handler.
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -85,15 +88,21 @@ func (r *RateLimiter) Allow(key string) (bool, time.Duration) {
 // IP. It is intended for `/auth/login` to blunt brute-force / credential
 // stuffing attacks against bcrypt-protected accounts.
 //
-// Limits are read from env (with safe defaults) so they can be tuned per
-// environment without rebuilding the image:
+// Every rejection is mirrored to Compliance /v1/event as a fire-and-forget
+// HTTP call so the platform keeps a durable audit trail of throttle events.
+// Failures of that call are logged and dropped; they never affect the
+// 429 response.
 //
-//   AUTH_RATE_LIMIT_BURST    default 5  — max attempts in a burst per IP
-//   AUTH_RATE_LIMIT_PER_SEC  default 0.0333 (1 per 30s) — refill rate
+// Limits are read from env (with safe defaults):
+//
+//   AUTH_RATE_LIMIT_BURST    default 5         max attempts in a burst per IP
+//   AUTH_RATE_LIMIT_PER_SEC  default 0.0333    refill rate (one per 30s)
+//   COMPLIANCE_URL           default empty     when set, 429s are audited
 func LoginRateLimiter() gin.HandlerFunc {
 	burst := envFloat("AUTH_RATE_LIMIT_BURST", 5)
 	perSec := envFloat("AUTH_RATE_LIMIT_PER_SEC", 1.0/30.0)
 	limiter := NewRateLimiter(burst, perSec)
+	complianceURL := os.Getenv("COMPLIANCE_URL")
 
 	return func(c *gin.Context) {
 		key := clientIP(c)
@@ -104,14 +113,54 @@ func LoginRateLimiter() gin.HandlerFunc {
 				retrySecs = 1
 			}
 			c.Header("Retry-After", strconv.Itoa(retrySecs))
+			emitRateLimitAudit(complianceURL, key, retrySecs)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error":             "Demasiados intentos de inicio de sesión. Por favor, espere antes de reintentar.",
-				"retry_after_secs":  retrySecs,
+				"error":            "Demasiados intentos de inicio de sesión. Por favor, espere antes de reintentar.",
+				"retry_after_secs": retrySecs,
 			})
 			return
 		}
 		c.Next()
 	}
+}
+
+// emitRateLimitAudit posts a single audit row to Compliance /v1/event in
+// a detached goroutine. The tenant_id is intentionally "unknown" because
+// the throttle fires before the login request has been authenticated.
+func emitRateLimitAudit(complianceURL, clientIP string, retrySecs int) {
+	if complianceURL == "" {
+		return
+	}
+	body := map[string]any{
+		"level":     "WARN",
+		"tenant_id": "unknown",
+		"component": "tenant",
+		"action":    "RATE_LIMITED",
+		"metadata": map[string]any{
+			"scope":            "login",
+			"client_ip":        clientIP,
+			"retry_after_secs": retrySecs,
+		},
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			complianceURL+"/v1/event", bytes.NewReader(payload))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}()
 }
 
 // clientIP prefers Cloudflare's CF-Connecting-IP header (set when the
