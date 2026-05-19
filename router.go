@@ -52,6 +52,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	api := router.Group("/api/v1")
 	api.Use(auth.AuthMiddleware(cfg))
 	{
+		// Recibe { "email": "", "password": "" } y emite un JWT firmado verificando contra SQL.
+		// Rate-limited por IP para mitigar fuerza bruta / credential stuffing contra bcrypt.
+		authGroup.POST("/login", middlewares.LoginRateLimiter(), handlers.LoginHandler)
+	}
 		// ── Auth (self) ───────────────────────────────────────────────────
 		api.GET("/auth/me", auth.GetMe)
 		api.PATCH("/auth/me/password", auth.ChangePassword)
