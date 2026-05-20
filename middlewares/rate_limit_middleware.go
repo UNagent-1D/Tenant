@@ -95,9 +95,9 @@ func (r *RateLimiter) Allow(key string) (bool, time.Duration) {
 //
 // Limits are read from env (with safe defaults):
 //
-//   AUTH_RATE_LIMIT_BURST    default 5         max attempts in a burst per IP
-//   AUTH_RATE_LIMIT_PER_SEC  default 0.0333    refill rate (one per 30s)
-//   COMPLIANCE_URL           default empty     when set, 429s are audited
+//	AUTH_RATE_LIMIT_BURST    default 5         max attempts in a burst per IP
+//	AUTH_RATE_LIMIT_PER_SEC  default 0.0333    refill rate (one per 30s)
+//	COMPLIANCE_URL           default empty     when set, 429s are audited
 func LoginRateLimiter() gin.HandlerFunc {
 	burst := envFloat("AUTH_RATE_LIMIT_BURST", 5)
 	perSec := envFloat("AUTH_RATE_LIMIT_PER_SEC", 1.0/30.0)

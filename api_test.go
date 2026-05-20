@@ -814,7 +814,6 @@ func TestIntegration_DataSourceCRUD(t *testing.T) {
 	})
 }
 
-
 func TestIntegration_ToolRegistry(t *testing.T) {
 	skipIfNoDB(t)
 
