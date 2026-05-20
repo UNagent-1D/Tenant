@@ -125,11 +125,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		}
 	}
 
-	// ── Internal (orchestrator only) ───────────────────────────────────────
+	// ── Internal (orchestrator + User-Auth) ────────────────────────────────
 	internal := router.Group("/api/v1/internal")
 	internal.Use(auth.InternalKeyMiddleware(cfg))
 	{
 		internal.POST("/tenants/:id/data-sources/:did/execute", tenant.ExecuteDataSource(cfg))
+		// User-Auth posts here after verifying an OTP. Tenant upserts the
+		// users row (default tenant_operator) and mints the canonical JWT.
+		internal.POST("/auth/upsert-from-otp", auth.UpsertFromOTPHandler(cfg))
 	}
 
 	return router
