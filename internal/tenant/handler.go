@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"log"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,8 +156,17 @@ func CreateTenant(cfg *config.Config) gin.HandlerFunc {
 				c.JSON(http.StatusConflict, gin.H{"error": "tenant schema already exists"})
 				return
 			}
+			log.Printf("provisionTenantSchema failed slug=%q: %v", t.Slug, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision tenant schema", "request_id": c.GetString("request_id")})
 			return
+		}
+
+		// Auto-provision a default agent profile + active ACR config so the
+		// brand-new tenant has a functional bot from the moment of creation.
+		// Failure here is non-fatal: the schema is already there; the admin
+		// can re-add the profile via the Profiles UI later. Log and continue.
+		if err := autoProvisionDefaultAgent(c.Request.Context(), t.Slug); err != nil {
+			log.Printf("autoProvisionDefaultAgent failed slug=%q: %v — tenant created without default agent", t.Slug, err)
 		}
 
 		c.JSON(http.StatusCreated, t)
