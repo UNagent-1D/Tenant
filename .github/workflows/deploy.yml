@@ -4,11 +4,11 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
     inputs:
       env:
-        description: "Target environment"
+        description: "Target environment (manual override)"
         required: true
         type: choice
         default: dev
@@ -18,13 +18,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ inputs.env || 'dev' }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   deploy-dev:
     name: Railway / dev
-    if: github.event_name == 'push' || inputs.env == 'dev'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
+      (github.event_name == 'workflow_dispatch' && inputs.env == 'dev')
     runs-on: ubuntu-latest
     environment: dev
     env:
@@ -49,7 +51,9 @@ jobs:
 
   deploy-prod:
     name: Railway / prod
-    if: github.event_name == 'workflow_dispatch' && inputs.env == 'prod'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.env == 'prod')
     runs-on: ubuntu-latest
     environment: prod
     env:
