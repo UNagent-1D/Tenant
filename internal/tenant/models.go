@@ -196,7 +196,6 @@ type UpdateToolRequest struct {
 	IsActive    *bool   `json:"is_active"`
 }
 
-
 // ── Execute (endpoint interno) ────────────────────────────────────────────────
 
 type ExecuteRequest struct {
