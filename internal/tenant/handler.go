@@ -1,10 +1,10 @@
 package tenant
 
 import (
-	"log"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
