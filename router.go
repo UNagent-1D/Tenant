@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/UNagent-1D/Tenant/config"
 	"github.com/UNagent-1D/Tenant/internal/auth"
@@ -10,6 +11,22 @@ import (
 	mw "github.com/UNagent-1D/Tenant/pkg/middleware"
 	"github.com/gin-gonic/gin"
 )
+
+// legacyPathRewrite remaps the routes the pre-Next.js Vite bundle still
+// uses (`/api/admin/...`, `/auth/...`) onto the current /api/v1/... layout
+// so the live Cloudflare Worker can keep working until the FrontEnd is
+// rebuilt. Drop this whole middleware once the SPA is rebuilt against
+// the v1 paths directly.
+func legacyPathRewrite() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := c.Request.URL.Path
+		switch {
+		case strings.HasPrefix(p, "/api/admin/"):
+			c.Request.URL.Path = "/api/v1/" + strings.TrimPrefix(p, "/api/admin/")
+		}
+		c.Next()
+	}
+}
 
 // tenantChain runs RoleMiddleware before TenantScopeMiddleware so that
 // role enforcement (no DB) always happens before the slug resolution (needs DB).
@@ -42,6 +59,7 @@ func corsMiddleware() gin.HandlerFunc {
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.New()
 	router.Use(corsMiddleware())
+	router.Use(legacyPathRewrite())
 	router.Use(mw.RequestIDMiddleware())
 	router.Use(mw.StructuredLoggerMiddleware())
 	router.Use(gin.Recovery())
