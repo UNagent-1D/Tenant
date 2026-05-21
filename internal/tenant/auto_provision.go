@@ -99,5 +99,39 @@ func autoProvisionDefaultAgent(ctx context.Context, slug string) error {
 		return fmt.Errorf("link profile→config: %w", err)
 	}
 
+	// Insert the default Hospital-Mock data source. route_configs maps each
+	// LLM tool name to {method, path}; the {placeholders} get filled from
+	// path_params on the executor side.
+	const hospitalRouteConfigs = `{
+		"list_doctors":             {"method": "GET",  "path": "/doctors"},
+		"get_doctor_schedule":      {"method": "GET",  "path": "/doctors/{doctor_id}/schedule"},
+		"book_appointment":         {"method": "POST", "path": "/appointments"},
+		"cancel_appointment":       {"method": "POST", "path": "/appointments/{appointment_id}/cancel"},
+		"reschedule_appointment":   {"method": "POST", "path": "/appointments/{appointment_id}/reschedule"},
+		"get_patient_appointments": {"method": "GET",  "path": "/patients/{patient_ref}/appointments"}
+	}`
+
+	var dataSourceID string
+	q4 := fmt.Sprintf(`
+		INSERT INTO %s.data_sources
+			(name, source_type, base_url, route_configs, is_active)
+		VALUES ($1, $2, $3, $4::jsonb, true)
+		RETURNING id
+	`, schema)
+	if err := db.Pool.QueryRow(ctx, q4,
+		"Hospital-Mock Scheduling",
+		"scheduling",
+		"http://hospital-mock:8080",
+		hospitalRouteConfigs,
+	).Scan(&dataSourceID); err != nil {
+		return fmt.Errorf("insert data_source: %w", err)
+	}
+
+	// Bind the config to the data source so /profiles/active can return it.
+	q5 := fmt.Sprintf(`UPDATE %s.agent_configs SET data_source_id = $1 WHERE id = $2`, schema)
+	if _, err := db.Pool.Exec(ctx, q5, dataSourceID, configID); err != nil {
+		return fmt.Errorf("link config→data_source: %w", err)
+	}
+
 	return nil
 }

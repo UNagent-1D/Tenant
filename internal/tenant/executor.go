@@ -28,11 +28,10 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 		}
 
 		// Resolve tenant — check it exists and is active
-		var slug string
-		var isActive bool
+		var slug, status string
 		err := db.Pool.QueryRow(c.Request.Context(),
-			"SELECT slug, is_active FROM tenants WHERE id = $1", tenantID,
-		).Scan(&slug, &isActive)
+			"SELECT slug, status FROM tenants WHERE id = $1", tenantID,
+		).Scan(&slug, &status)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{"error": "tenant not found"})
@@ -41,12 +40,14 @@ func ExecuteDataSource(cfg *config.Config) gin.HandlerFunc {
 			internalError(c)
 			return
 		}
-		if !isActive {
+		if status != "active" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "tenant is not active"})
 			return
 		}
 
-		schema := "tenant_" + slug
+		// Quote the schema identifier so slugs with hyphens
+		// (e.g. "demo-hospital") parse as a single identifier.
+		schema := fmt.Sprintf("%q", "tenant_"+slug)
 
 		// Fetch data source
 		var ds DataSource

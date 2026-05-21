@@ -75,7 +75,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 			tenantGroup := tenants.Group("/:id")
 			{
-				tenantGroup.GET("", append(tenantChain("tenant_admin"), tenant.GetTenant)...)
+				// Read access for any role inside the tenant — operators need
+				// the tenant name for sidebar/branding. tenantChain still
+				// enforces self-tenant scope, so an operator can only read
+				// their own tenant.
+				tenantGroup.GET("", append(tenantChain("tenant_admin", "tenant_operator"), tenant.GetTenant)...)
 				tenantGroup.PATCH("", append(tenantChain("tenant_admin"), tenant.UpdateTenant)...)
 
 				// Channels — tenant_admin only

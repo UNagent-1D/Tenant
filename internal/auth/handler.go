@@ -344,13 +344,23 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
+	// Empty-string names are normalised to NULL so the column stays clean
+	// for rows where the caller didn't supply a name.
+	var firstName, lastName *string
+	if req.FirstName != "" {
+		firstName = &req.FirstName
+	}
+	if req.LastName != "" {
+		lastName = &req.LastName
+	}
+
 	var u UserResponse
 	err = db.Pool.QueryRow(c.Request.Context(),
-		`INSERT INTO users (email, password_hash, role, tenant_id)
-		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, email, role, tenant_id, is_active, created_at`,
-		req.Email, string(hash), req.Role, req.TenantID,
-	).Scan(&u.ID, &u.Email, &u.Role, &u.TenantID, &u.IsActive, &u.CreatedAt)
+		`INSERT INTO users (email, password_hash, role, tenant_id, first_name, last_name)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, email, role, tenant_id, is_active, created_at, first_name, last_name`,
+		req.Email, string(hash), req.Role, req.TenantID, firstName, lastName,
+	).Scan(&u.ID, &u.Email, &u.Role, &u.TenantID, &u.IsActive, &u.CreatedAt, &u.FirstName, &u.LastName)
 
 	if err != nil {
 		var pgErr *pgconn.PgError
