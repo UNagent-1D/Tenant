@@ -9,6 +9,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// demoTenantID is the canonical UUID for the single-tenant demo. The FrontEnd
+// hardcodes this same value (NEXT_PUBLIC_DEMO_HOSPITAL_TENANT_ID default in
+// features/users/UsersManager.tsx) and chat-orch uses it as
+// TELEGRAM_DEFAULT_TENANT_ID, so tenant-scoped user creation and Telegram
+// enrollment resolve to a row that actually exists on a fresh volume.
+const (
+	demoTenantID   = "ce5ac1c5-9b16-486a-b091-5468d232a4b8"
+	demoTenantSlug = "demo-hospital"
+	demoTenantName = "Demo Hospital"
+)
+
 func main() {
 	email := mustEnv("SEED_EMAIL")
 	password := mustEnv("SEED_PASSWORD")
@@ -20,6 +31,15 @@ func main() {
 	}
 	defer pool.Close()
 
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $3)
+		 ON CONFLICT (id) DO NOTHING`,
+		demoTenantID, demoTenantSlug, demoTenantName,
+	); err != nil {
+		log.Fatalf("tenant seed failed: %v", err)
+	}
+	log.Printf("demo tenant ensured: %s (%s)", demoTenantSlug, demoTenantID)
+
 	var count int
 	if err := pool.QueryRow(context.Background(),
 		"SELECT COUNT(*) FROM users WHERE role = 'app_admin'",
@@ -27,7 +47,8 @@ func main() {
 		log.Fatalf("query failed: %v", err)
 	}
 	if count > 0 {
-		log.Fatal("app_admin already exists, aborting seed")
+		log.Printf("app_admin already exists, skipping admin seed")
+		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
