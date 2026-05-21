@@ -19,7 +19,7 @@ func Load() *Config {
 		DatabaseURL:    getEnv("DATABASE_URL", "postgres://postgres:admin@localhost:5432/postgres?sslmode=disable"),
 		JWTSecret:      getEnv("JWT_SECRET", "super-secreto-cambiar-en-produccion"),
 		JWTExpiry:      8 * time.Hour,
-		InternalAPIKey: mustEnv("INTERNAL_API_KEY"),
+		InternalAPIKey: getEnv("INTERNAL_API_KEY", "dev-internal-key"),
 		HTTPTimeout:    10 * time.Second,
 		Port:           getEnv("PORT", "8080"),
 	}
