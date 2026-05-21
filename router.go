@@ -12,19 +12,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// legacyPathRewrite remaps the routes the pre-Next.js Vite bundle still
-// uses (`/api/admin/...`, `/auth/...`) onto the current /api/v1/... layout
-// so the live Cloudflare Worker can keep working until the FrontEnd is
-// rebuilt. Drop this whole middleware once the SPA is rebuilt against
-// the v1 paths directly.
-func legacyPathRewrite() gin.HandlerFunc {
+// legacyPathRewrite is wired as the router's NoRoute handler. Gin matches
+// routes BEFORE global middlewares run, so a regular Use() middleware can't
+// rewrite the path in time. NoRoute fires when nothing matched; we mutate
+// URL.Path and re-enter the router via HandleContext so /api/admin/foo gets
+// served by /api/v1/foo's handler chain (including its auth/role gates).
+// Drop this whole shim once the SPA is rebuilt against /api/v1/... directly.
+func legacyPathRewrite(router *gin.Engine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := c.Request.URL.Path
 		switch {
 		case strings.HasPrefix(p, "/api/admin/"):
 			c.Request.URL.Path = "/api/v1/" + strings.TrimPrefix(p, "/api/admin/")
+			router.HandleContext(c)
+			return
 		}
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"error":      "route not found",
+			"request_id": c.GetString("request_id"),
+		})
 	}
 }
 
@@ -59,10 +65,10 @@ func corsMiddleware() gin.HandlerFunc {
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.New()
 	router.Use(corsMiddleware())
-	router.Use(legacyPathRewrite())
 	router.Use(mw.RequestIDMiddleware())
 	router.Use(mw.StructuredLoggerMiddleware())
 	router.Use(gin.Recovery())
+	router.NoRoute(legacyPathRewrite(router))
 
 	// Public — login is rate-limited per client IP to mitigate brute force / credential stuffing.
 	loginHandler := auth.LoginHandler(cfg)
