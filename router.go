@@ -47,8 +47,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	router.Use(gin.Recovery())
 
 	// Public — login is rate-limited per client IP to mitigate brute force / credential stuffing.
-	router.POST("/api/v1/auth/login", middlewares.LoginRateLimiter(), auth.LoginHandler(cfg))
+	loginHandler := auth.LoginHandler(cfg)
+	router.POST("/api/v1/auth/login", middlewares.LoginRateLimiter(), loginHandler)
+	// Legacy alias kept while the stale Worker bundle still POSTs to /auth/login.
+	// Drop once the SPA is rebuilt against /api/v1/auth/login.
+	router.POST("/auth/login", middlewares.LoginRateLimiter(), loginHandler)
 	router.GET("/api/v1/health", HealthCheck)
+	router.GET("/health", HealthCheck)
 
 	api := router.Group("/api/v1")
 	api.Use(auth.AuthMiddleware(cfg))
