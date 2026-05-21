@@ -75,7 +75,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 			tenantGroup := tenants.Group("/:id")
 			{
-				tenantGroup.GET("", append(tenantChain("tenant_admin"), tenant.GetTenant)...)
+				// Read access for any role inside the tenant — operators need
+				// the tenant name for sidebar/branding. tenantChain still
+				// enforces self-tenant scope, so an operator can only read
+				// their own tenant.
+				tenantGroup.GET("", append(tenantChain("tenant_admin", "tenant_operator"), tenant.GetTenant)...)
 				tenantGroup.PATCH("", append(tenantChain("tenant_admin"), tenant.UpdateTenant)...)
 
 				// Channels — tenant_admin only
@@ -133,6 +137,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// User-Auth posts here after verifying an OTP. Tenant upserts the
 		// users row (default tenant_operator) and mints the canonical JWT.
 		internal.POST("/auth/upsert-from-otp", auth.UpsertFromOTPHandler(cfg))
+		// agent-runtime (and chat-orch in Phase 3) consume this to resolve
+		// the active LLM model + system prompt + tools for a tenant.
+		internal.GET("/tenants/:id/profiles/active", tenant.GetActiveAgentByTenantID)
 	}
 
 	return router

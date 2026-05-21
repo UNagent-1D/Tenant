@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"log"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,8 +156,17 @@ func CreateTenant(cfg *config.Config) gin.HandlerFunc {
 				c.JSON(http.StatusConflict, gin.H{"error": "tenant schema already exists"})
 				return
 			}
+			log.Printf("provisionTenantSchema failed slug=%q: %v", t.Slug, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to provision tenant schema", "request_id": c.GetString("request_id")})
 			return
+		}
+
+		// Auto-provision a default agent profile + active ACR config so the
+		// brand-new tenant has a functional bot from the moment of creation.
+		// Failure here is non-fatal: the schema is already there; the admin
+		// can re-add the profile via the Profiles UI later. Log and continue.
+		if err := autoProvisionDefaultAgent(c.Request.Context(), t.Slug); err != nil {
+			log.Printf("autoProvisionDefaultAgent failed slug=%q: %v — tenant created without default agent", t.Slug, err)
 		}
 
 		c.JSON(http.StatusCreated, t)
@@ -244,7 +254,7 @@ func UpdateTenant(c *gin.Context) {
 
 func GetChannels(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	rows, err := db.Pool.Query(c.Request.Context(),
 		fmt.Sprintf(`SELECT id, tenant_id, channel_type, channel_key, is_active, created_at, updated_at
@@ -271,7 +281,7 @@ func GetChannels(c *gin.Context) {
 
 func CreateChannel(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 	tenantID := c.Param("id")
 
 	var req CreateChannelRequest
@@ -310,7 +320,7 @@ func CreateChannel(c *gin.Context) {
 
 func UpdateChannel(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req UpdateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -369,7 +379,7 @@ func UpdateChannel(c *gin.Context) {
 
 func GetProfiles(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	rows, err := db.Pool.Query(c.Request.Context(),
 		fmt.Sprintf(`SELECT id, name, description, scheduling_flow_rules, escalation_rules,
@@ -398,7 +408,7 @@ func GetProfiles(c *gin.Context) {
 
 func CreateProfile(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req CreateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -436,7 +446,7 @@ func CreateProfile(c *gin.Context) {
 
 func UpdateProfile(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req UpdateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -513,7 +523,7 @@ func UpdateProfile(c *gin.Context) {
 
 func GetConfigs(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var exists bool
 	if err := db.Pool.QueryRow(c.Request.Context(),
@@ -556,7 +566,7 @@ func GetConfigs(c *gin.Context) {
 
 func GetActiveConfig(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var cfg AgentConfig
 	err := db.Pool.QueryRow(c.Request.Context(),
@@ -581,7 +591,7 @@ func GetActiveConfig(c *gin.Context) {
 
 func CreateConfig(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 	caller := c.MustGet("user_claims").(*auth.Claims)
 
 	var req CreateAgentConfigRequest
@@ -659,7 +669,7 @@ func CreateConfig(c *gin.Context) {
 
 func UpdateConfig(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req UpdateAgentConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -753,7 +763,7 @@ func UpdateConfig(c *gin.Context) {
 
 func ActivateConfig(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 	configID := c.Param("cid")
 	profileID := c.Param("pid")
 
@@ -876,7 +886,7 @@ func validateEscalationRules(raw json.RawMessage) error {
 
 func GetDataSources(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	rows, err := db.Pool.Query(c.Request.Context(),
 		fmt.Sprintf(`SELECT id, name, source_type, base_url, credential_ref, route_configs, is_active, created_at, updated_at
@@ -903,7 +913,7 @@ func GetDataSources(c *gin.Context) {
 
 func CreateDataSource(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req CreateDataSourceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -949,7 +959,7 @@ func CreateDataSource(c *gin.Context) {
 
 func UpdateDataSource(c *gin.Context) {
 	slug := c.MustGet("tenant_slug").(string)
-	schema := fmt.Sprintf("tenant_%s", slug)
+	schema := fmt.Sprintf("%q", "tenant_"+slug) // quoted so hyphenated slugs (e.g. demo-hospital) parse as one identifier
 
 	var req UpdateDataSourceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
