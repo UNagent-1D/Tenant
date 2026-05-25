@@ -156,6 +156,10 @@ func TestRateLimiterTokenBucketAllowExact(t *testing.T) {
 func TestRateLimiterCFConnectingIPHeaderTakesPriority(t *testing.T) {
 	t.Setenv("AUTH_RATE_LIMIT_BURST", "1")
 	t.Setenv("AUTH_RATE_LIMIT_PER_SEC", "0.0001")
+	// TRUST_PROXY_HEADERS must be true so that CF-Connecting-IP is honoured
+	// (production mode, behind Cloudflare). Without it clientIP falls back to
+	// RemoteAddr and the header-isolation test makes no sense.
+	t.Setenv("TRUST_PROXY_HEADERS", "true")
 	r := newTestRouter(1, 0.0001)
 
 	cfIP := "203.0.113.10"
@@ -184,5 +188,34 @@ func TestRateLimiterCFConnectingIPHeaderTakesPriority(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for different CF-Connecting-IP, got %d", w.Code)
+	}
+}
+
+func TestRateLimiterHeaderBypassBlockedWhenProxyTrustDisabled(t *testing.T) {
+	// TRUST_PROXY_HEADERS defaults to false (unset).
+	// Clients must not be able to bypass the rate limit by rotating spoofed IPs
+	// in CF-Connecting-IP or X-Forwarded-For.
+	t.Setenv("AUTH_RATE_LIMIT_BURST", "1")
+	t.Setenv("AUTH_RATE_LIMIT_PER_SEC", "0.0001")
+	// Do NOT set TRUST_PROXY_HEADERS — it must default to untrusted.
+	t.Setenv("TRUST_PROXY_HEADERS", "false")
+	r := newTestRouter(1, 0.0001)
+
+	sharedAddr := "10.9.9.1:1"
+
+	// Exhaust the real-socket bucket for this RemoteAddr.
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", nil)
+	req.RemoteAddr = sharedAddr
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	// Even with a different CF-Connecting-IP, the real bucket (RemoteAddr) is exhausted.
+	req = httptest.NewRequest(http.MethodPost, "/auth/login", nil)
+	req.RemoteAddr = sharedAddr
+	req.Header.Set("CF-Connecting-IP", "1.2.3.4") // spoofed
+	req.Header.Set("X-Forwarded-For", "5.6.7.8")  // spoofed
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 (bypass blocked), got %d — spoofed headers bypassed rate limit!", w.Code)
 	}
 }

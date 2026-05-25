@@ -372,6 +372,9 @@ func CreateUser(c *gin.Context) {
 			case "23503":
 				c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id references a tenant that does not exist"})
 				return
+			case "22P02":
+				c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id must be a valid UUID"})
+				return
 			}
 		}
 		internalError(c)

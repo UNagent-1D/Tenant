@@ -163,23 +163,28 @@ func emitRateLimitAudit(complianceURL, clientIP string, retrySecs int) {
 	}()
 }
 
-// clientIP prefers Cloudflare's CF-Connecting-IP header (set when the
-// service is exposed via Cloudflare Tunnel) and falls back to
-// X-Forwarded-For and finally the socket peer. Behind the reverse proxy,
-// the socket peer is always the proxy itself — never use it as the sole
-// throttle key in production.
+// clientIP returns the best-effort real client IP.
+//
+// Proxy headers (CF-Connecting-IP, X-Forwarded-For) are only trusted when
+// TRUST_PROXY_HEADERS=true is set in the environment.  In that mode the
+// service is assumed to be behind a trusted edge (e.g. Cloudflare) that
+// strips or overwrites these headers before forwarding.  When the flag is
+// absent or false (default, local dev), only the socket peer address is
+// used so that clients cannot bypass rate limiting by spoofing headers.
 func clientIP(c *gin.Context) string {
-	if ip := c.GetHeader("CF-Connecting-IP"); ip != "" {
-		return ip
-	}
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For may be a comma list; take the first element.
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return trimSpace(xff[:i])
-			}
+	if os.Getenv("TRUST_PROXY_HEADERS") == "true" {
+		if ip := c.GetHeader("CF-Connecting-IP"); ip != "" {
+			return ip
 		}
-		return trimSpace(xff)
+		if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
+			// X-Forwarded-For may be a comma list; take the first element.
+			for i := 0; i < len(xff); i++ {
+				if xff[i] == ',' {
+					return trimSpace(xff[:i])
+				}
+			}
+			return trimSpace(xff)
+		}
 	}
 	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
 	if err != nil || host == "" {

@@ -43,17 +43,23 @@ func tenantChain(roles ...string) []gin.HandlerFunc {
 	}
 }
 
-func corsMiddleware() gin.HandlerFunc {
+func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(cfg.CORSAllowOrigins))
+	for _, o := range cfg.CORSAllowOrigins {
+		allowed[o] = struct{}{}
+	}
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		if origin == "" {
-			origin = "*"
+		if origin != "" {
+			if _, ok := allowed[origin]; ok {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+			// Unknown origins get no ACAO header — browser blocks the request.
 		}
-		c.Header("Access-Control-Allow-Origin", origin)
 		c.Header("Vary", "Origin")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Internal-Key")
-		c.Header("Access-Control-Allow-Credentials", "true")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -64,7 +70,7 @@ func corsMiddleware() gin.HandlerFunc {
 
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	router := gin.New()
-	router.Use(corsMiddleware())
+	router.Use(corsMiddleware(cfg))
 	router.Use(mw.RequestIDMiddleware())
 	router.Use(mw.StructuredLoggerMiddleware())
 	router.Use(gin.Recovery())
