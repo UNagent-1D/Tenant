@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -115,7 +116,7 @@ func LoginRateLimiter() gin.HandlerFunc {
 			c.Header("Retry-After", strconv.Itoa(retrySecs))
 			emitRateLimitAudit(complianceURL, key, retrySecs)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error":            "Demasiados intentos de inicio de sesión. Por favor, espere antes de reintentar.",
+				"error":            fmt.Sprintf("Demasiados intentos de inicio de sesión. Espera %d segundos e intenta de nuevo.", retrySecs),
 				"retry_after_secs": retrySecs,
 			})
 			return
